@@ -37,6 +37,7 @@ try:
     from pytorch3d.structures import Pointclouds
     from pytorch3d.io import IO
     from pytorch3d.renderer.cameras import PerspectiveCameras
+    from pytorch3d.implicitron.dataset.data_loader_map_provider import FrameData
     PYTORCH3D_AVAILABLE = True
 except ImportError:
     PYTORCH3D_AVAILABLE = False
@@ -49,6 +50,18 @@ try:
 except ImportError:
     ARCHITECTURE_AVAILABLE = False
     print("Warning: Could not import project architecture. Using basic model.")
+
+
+# Set CUDA environment variables
+# CUDA is bundled with PyTorch in the conda environment
+_conda_env_path = Path(sys.prefix)  # Gets the current conda environment path
+_cuda_path = _conda_env_path  # CUDA libraries are in the conda environment root
+if str(_conda_env_path) not in os.environ.get('PATH', ''):
+    os.environ['PATH'] = f"{_conda_env_path}\\Library\\bin;" + os.environ.get('PATH', '')
+os.environ['CUDA_PATH'] = str(_conda_env_path)
+# Set CUDA architecture list to avoid compilation warnings and enable proper CUDA extension loading
+# Using a common architecture that works across most NVIDIA cards
+os.environ['TORCH_CUDA_ARCH_LIST'] = '7.0;7.5;8.0;8.6;9.0'
 
 
 # ============================================================================
@@ -187,7 +200,7 @@ class CustomPointCloudDataset(Dataset):
         if PYTORCH3D_AVAILABLE:
             # Create a perspective camera at distance 2 from origin
             R = torch.eye(3).unsqueeze(0)
-            T = torch.tensor([[[0.0, 0.0, 2.0]]])
+            T = torch.tensor([[0.0, 0.0, 2.0]])  # shape (1,3)
             camera = PerspectiveCameras(R=R, T=T, image_size=((self.image_size, self.image_size),))
         else:
             camera = None
@@ -204,6 +217,47 @@ class CustomPointCloudDataset(Dataset):
             'points_path': str(pointcloud_path),
             'name': base_name,
         }
+
+
+def custom_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Collate function that can handle Pointclouds objects."""
+    # Stack image and mask tensors
+    image_rgb = torch.cat([b['image_rgb'] for b in batch], dim=0)  # (B,3,H,W)
+    mask = torch.cat([b['mask'] for b in batch], dim=0)            # (B,1,H,W)
+
+    # Collect point clouds
+    pcs = [b['sequence_point_cloud'] for b in batch]
+    if PYTORCH3D_AVAILABLE:
+        # Each entry is Pointclouds of size (1,N,3) or tensor; normalize to tensor list
+        pts_list = []
+        for pc in pcs:
+            if isinstance(pc, Pointclouds):
+                pts_list.append(pc.points_padded()[0])
+            else:
+                pts_list.append(pc.squeeze(0))
+        sequence_point_cloud = Pointclouds(points=pts_list)
+    else:
+        sequence_point_cloud = torch.stack([pc.squeeze(0) for pc in pcs], dim=0)
+
+    # Cameras: keep list (model can take list or None)
+    cameras = [b['camera'] for b in batch]
+    if all(c is None for c in cameras):
+        cameras = None
+    elif PYTORCH3D_AVAILABLE:
+        R = torch.cat([c.R for c in cameras], dim=0)
+        T = torch.cat([c.T for c in cameras], dim=0)
+        image_sizes = torch.stack([c.image_size[0] for c in cameras], dim=0).to(cameras[0].device)
+        cameras = PerspectiveCameras(R=R, T=T, image_size=image_sizes, device=cameras[0].device)
+
+    names = [b['name'] for b in batch]
+
+    return {
+        'image_rgb': image_rgb,
+        'sequence_point_cloud': sequence_point_cloud,
+        'camera': cameras,
+        'mask': mask,
+        'name': names,
+    }
 
 
 # ============================================================================
@@ -267,7 +321,8 @@ def create_model(device: torch.device):
         beta_schedule='linear',
         
         # Point cloud model
-        point_cloud_model='pvcnn',
+        # Use simple model to avoid CUDA extension compilation on Windows
+        point_cloud_model='simple',
         point_cloud_model_embed_dim=64,
     ).to(device)
     
@@ -304,15 +359,28 @@ def train_step(
     # Convert tensor to Pointclouds if needed
     if isinstance(pc, torch.Tensor):
         pc = Pointclouds(points=pc.squeeze(0))
+    pc = pc.to(device)
+    if camera is not None:
+        camera = camera.to(device)
     
     # Forward pass through diffusion model
     # The model handles: noise injection, conditioning, and loss computation
-    loss = model(
-        pc=pc,
-        camera=camera,
-        image_rgb=image_rgb,
-        mask=mask,
-    )
+    if PYTORCH3D_AVAILABLE:
+        batch_fd = FrameData(
+            sequence_point_cloud=pc,
+            camera=camera,
+            image_rgb=image_rgb,
+            fg_probability=mask,
+        )
+        loss = model(batch_fd, mode='train')
+    else:
+        # Fallback: simple call expects batch dict (model may not support this path)
+        loss = model(
+            pc=pc,
+            camera=camera,
+            image_rgb=image_rgb,
+            mask=mask,
+        )
     
     # Backward pass
     optimizer.zero_grad()
@@ -352,13 +420,25 @@ def validate(
             # Convert tensor to Pointclouds if needed
             if isinstance(pc, torch.Tensor):
                 pc = Pointclouds(points=pc.squeeze(0))
-            
-            loss = model(
-                pc=pc,
-                camera=camera,
-                image_rgb=image_rgb,
-                mask=mask,
-            )
+            pc = pc.to(device)
+            if camera is not None:
+                camera = camera.to(device)
+
+            if PYTORCH3D_AVAILABLE:
+                batch_fd = FrameData(
+                    sequence_point_cloud=pc,
+                    camera=camera,
+                    image_rgb=image_rgb,
+                    fg_probability=mask,
+                )
+                loss = model(batch_fd, mode='train')
+            else:
+                loss = model(
+                    pc=pc,
+                    camera=camera,
+                    image_rgb=image_rgb,
+                    mask=mask,
+                )
             
             losses.update(loss.item())
     
@@ -393,20 +473,41 @@ def predict(
             camera = batch['camera']
             mask = batch['mask'].to(device)
             names = batch['name']
-            
+
+            if isinstance(batch['sequence_point_cloud'], torch.Tensor):
+                pc = Pointclouds(points=batch['sequence_point_cloud'].squeeze(0)).to(device)
+            else:
+                pc = batch['sequence_point_cloud'].to(device)
+            if camera is not None:
+                camera = camera.to(device)
+
             # Sample from diffusion model
             # Returns Pointclouds objects
             try:
-                output, all_outputs = model(
-                    batch=None,  # Will create from components
-                    pc=None,  # Start from noise
-                    camera=camera,
-                    image_rgb=image_rgb,
-                    mask=mask,
-                    mode='sample',
-                    num_inference_steps=num_inference_steps,
-                    return_sample_every_n_steps=10,
-                )
+                if PYTORCH3D_AVAILABLE:
+                    batch_fd = FrameData(
+                        sequence_point_cloud=pc,
+                        camera=camera,
+                        image_rgb=image_rgb,
+                        fg_probability=mask,
+                    )
+                    output, all_outputs = model(
+                        batch_fd,
+                        mode='sample',
+                        num_inference_steps=num_inference_steps,
+                        return_sample_every_n_steps=10,
+                    )
+                else:
+                    output, all_outputs = model(
+                        batch=None,
+                        pc=None,
+                        camera=camera,
+                        image_rgb=image_rgb,
+                        mask=mask,
+                        mode='sample',
+                        num_inference_steps=num_inference_steps,
+                        return_sample_every_n_steps=10,
+                    )
             except Exception as e:
                 print(f"Sampling failed: {e}")
                 print("Falling back to unconditional sampling...")
@@ -460,6 +561,22 @@ def main(
     """
     
     device = torch.device(device)
+    # Test if PyTorch3D rasterizer supports GPU
+    if PYTORCH3D_AVAILABLE and device.type == 'cuda':
+        try:
+            test_pc = torch.randn(1, 10, 3).to(device)
+            from pytorch3d.renderer import PointsRasterizer, PointsRasterizationSettings
+            settings = PointsRasterizationSettings(image_size=64, radius=0.01, points_per_pixel=1)
+            camera_test = PerspectiveCameras(device=device)
+            rasterizer = PointsRasterizer(cameras=camera_test, raster_settings=settings)
+            _ = rasterizer(Pointclouds(points=test_pc))
+            print("PyTorch3D GPU rasterization: ENABLED")
+        except RuntimeError as e:
+            if "Not compiled with GPU support" in str(e):
+                print("PyTorch3D rasterizer has no GPU support; forcing CPU for training.")
+                device = torch.device('cpu')
+            else:
+                raise
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True, parents=True)
     
@@ -491,6 +608,7 @@ def main(
         shuffle=True,
         num_workers=num_workers,
         pin_memory=True if device.type == 'cuda' else False,
+        collate_fn=custom_collate_fn,
     )
     
     dataloader_val = DataLoader(
@@ -499,6 +617,7 @@ def main(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True if device.type == 'cuda' else False,
+        collate_fn=custom_collate_fn,
     )
     
     print(f"Train set: {train_size} samples")
@@ -658,8 +777,8 @@ if __name__ == '__main__':
     # ========================================================================
     
     # Data paths
-    SOURCE_DIR = r'C:\Users\User\PycharmProjects\projection-conditioned-point-cloud-diffusion\experiments\data_grads_v3\source'
-    TARGET_DIR = r'C:\Users\User\PycharmProjects\projection-conditioned-point-cloud-diffusion\experiments\data_grads_v3\target'
+    SOURCE_DIR = str(Path(r'D:\AllProjects\PycharmProjects\projection-conditioned-point-cloud-diffusion\data_grads_v3\source'))
+    TARGET_DIR = str(Path(r'D:\AllProjects\PycharmProjects\projection-conditioned-point-cloud-diffusion\data_grads_v3\target'))
     
     # ========================================================================
     # HARDCODED PARAMETERS - CUSTOMIZE HERE

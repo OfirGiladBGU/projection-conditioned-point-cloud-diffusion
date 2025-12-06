@@ -24,6 +24,7 @@ os.environ['CUDA_PATH'] = str(_conda_env_path)
 # Set CUDA architecture list to avoid compilation warnings and enable proper CUDA extension loading
 # Using a common architecture that works across most NVIDIA cards
 os.environ['TORCH_CUDA_ARCH_LIST'] = '7.0;7.5;8.0;8.6;9.0'
+os.environ['CO3DV2_DATASET_ROOT'] = str(Path(__file__).parent.parent / 'co3d')
 
 import training_utils
 import diffusion_utils
