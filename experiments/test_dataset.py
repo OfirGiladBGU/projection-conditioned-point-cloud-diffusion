@@ -1,14 +1,18 @@
 """Quick test to verify data loading works - simplified version without configs"""
 import sys
 from pathlib import Path
+
+# Add experiments directory to path for relative imports
+sys.path.insert(0, str(Path(__file__).parent))
+
 from PIL import Image
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 
 # Test parameters
-SOURCE_DIR = Path(r'C:\Users\User\PycharmProjects\projection-conditioned-point-cloud-diffusion\experiments\data_grads_v3\source')
-TARGET_DIR = Path(r'C:\Users\User\PycharmProjects\projection-conditioned-point-cloud-diffusion\experiments\data_grads_v3\target')
+SOURCE_DIR = Path(r'D:\AllProjects\PycharmProjects\projection-conditioned-point-cloud-diffusion\data_grads_v3\source')
+TARGET_DIR = Path(r'D:\AllProjects\PycharmProjects\projection-conditioned-point-cloud-diffusion\data_grads_v3\target')
 
 class SimpleDataset(Dataset):
     """Simplified dataset for testing"""

@@ -1,5 +1,12 @@
 import inspect
+import sys
+from pathlib import Path
 from typing import Optional
+
+# Ensure parent directory is in path for absolute imports
+_parent = Path(__file__).parent.parent
+if str(_parent) not in sys.path:
+    sys.path.insert(0, str(_parent))
 
 import torch
 import torch.nn.functional as F
@@ -12,9 +19,9 @@ from pytorch3d.structures import Pointclouds
 from torch import Tensor
 from tqdm import tqdm
 
-from .model_utils import get_num_points, get_custom_betas
-from .point_cloud_model import PointCloudModel
-from .projection_model import PointCloudProjectionModel
+from model.model_utils import get_num_points, get_custom_betas
+from model.point_cloud_model import PointCloudModel
+from model.projection_model import PointCloudProjectionModel
 
 
 class ConditionalPointCloudDiffusionModel(PointCloudProjectionModel):

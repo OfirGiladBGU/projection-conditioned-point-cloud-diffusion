@@ -1,13 +1,36 @@
+import sys
+from pathlib import Path
 from typing import Any, Callable, Iterable, List, Optional, Union
+
+# Ensure parent directory is in path for absolute imports
+_parent = Path(__file__).parent.parent.parent
+if str(_parent) not in sys.path:
+    sys.path.insert(0, str(_parent))
 
 import torch
 import torch.jit as jit
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 from torch import Size, Tensor, nn
 from torch.nn import LayerNorm
 
-from model.pvcnn.pvcnn_utils import get_timestep_embedding
+
+def get_timestep_embedding(embed_dim, timesteps, device):
+    """
+    Timestep embedding function (copied from pvcnn_utils to avoid PVCNN dependency).
+    This should work just as well for continuous values as for discrete values.
+    """
+    assert len(timesteps.shape) == 1  # and timesteps.dtype == tf.int32
+    half_dim = embed_dim // 2
+    emb = np.log(10000) / (half_dim - 1)
+    emb = torch.from_numpy(np.exp(np.arange(0, half_dim) * -emb)).float().to(device)
+    emb = timesteps[:, None] * emb[None, :]
+    emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
+    if embed_dim % 2 == 1:  # zero pad
+        emb = nn.functional.pad(emb, (0, 1), "constant", 0)
+    assert emb.shape == torch.Size([timesteps.shape[0], embed_dim])
+    return emb
 
 
 def sample_b(size: Size, sigma: float) -> Tensor:
@@ -254,8 +277,7 @@ class BasePointModel(nn.Module):
         continuous or discrete. This model has a sort of U-Net-like structure I think, 
         which is why it first goes down and then up in terms of resolution (?)
         """
-
-        # Embed and project timesteps
+        # Use local get_timestep_embedding function to avoid PVCNN dependency
         t_emb = get_timestep_embedding(self.timestep_embed_dim, t, inputs.device)
         t_emb = self.timestep_projection(t_emb)[:, None, :].expand(-1, inputs.shape[-1], -1)  # (B, N, D_t_emb)
 

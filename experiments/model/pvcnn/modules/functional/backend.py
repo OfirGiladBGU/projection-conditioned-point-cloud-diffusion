@@ -4,9 +4,10 @@ from pathlib import Path
 from torch.utils.cpp_extension import load
 
 
-gcc_path = os.getenv('CC', default='/usr/bin/gcc')
-if not Path(gcc_path).is_file():
-    raise ValueError('Could not find your gcc, please replace it here.')
+# gcc_path = os.getenv('CC', default='/usr/bin/gcc')
+# if not Path(gcc_path).is_file():
+    # raise ValueError('Could not find your gcc, please replace it here.')
+gcc_path = os.getenv('CC', default='gcc')
 
 _src_path = os.path.dirname(os.path.abspath(__file__))
 _backend = load(

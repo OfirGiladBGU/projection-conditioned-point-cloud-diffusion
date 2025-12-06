@@ -11,8 +11,8 @@ from torch.utils.data import Dataset, DataLoader
 import warnings
 warnings.filterwarnings('ignore')
 
-SOURCE_DIR = Path(r'C:\Users\User\PycharmProjects\projection-conditioned-point-cloud-diffusion\experiments\data_grads_v3\source')
-TARGET_DIR = Path(r'C:\Users\User\PycharmProjects\projection-conditioned-point-cloud-diffusion\experiments\data_grads_v3\target')
+SOURCE_DIR = Path(r'D:\AllProjects\PycharmProjects\projection-conditioned-point-cloud-diffusion\data_grads_v3\source')
+TARGET_DIR = Path(r'D:\AllProjects\PycharmProjects\projection-conditioned-point-cloud-diffusion\data_grads_v3\target')
 
 class SimpleDataset(Dataset):
     """Simplified dataset for testing"""
@@ -88,13 +88,12 @@ print("LOADING PC^2 MODEL")
 print("="*60)
 
 try:
-    # Bypass config system by directly importing model modules
-    sys.path.insert(0, str(Path(__file__).parent / 'model'))
+    # Import model using absolute imports
     from model.model import ConditionalPointCloudDiffusionModel
     from pytorch3d.structures import Pointclouds
     from pytorch3d.renderer.cameras import PerspectiveCameras
     
-    print("Model imports successful ✓")
+    print("Model imports successful [OK]")
     
     print("\nCreating model with image_size=512...")
     model = ConditionalPointCloudDiffusionModel(
@@ -114,11 +113,11 @@ try:
         beta_start=1e-5,
         beta_end=8e-3,
         beta_schedule='linear',
-        point_cloud_model='pvcnn',
+        point_cloud_model='simple',  # Use 'simple' instead of 'pvcnn' to avoid gcc dependency
         point_cloud_model_embed_dim=64,
     ).to(device)
     
-    print("Model created successfully ✓")
+    print("Model created successfully [OK]")
     
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
@@ -133,52 +132,53 @@ try:
     
     model.eval()
     
+    # Use CPU device for inference (PyTorch3D rasterizer has no GPU support on Windows)
+    test_device = 'cpu'
+    print(f"Using device for test: {test_device} (PyTorch3D rasterizer limitation)")
+    model = model.to(test_device)
+    
     with torch.no_grad():
-        image_rgb = batch_images.to(device)
-        points = batch_points[0].to(device).unsqueeze(0)
+        from pytorch3d.implicitron.dataset.data_loader_map_provider import FrameData
+        
+        image_rgb = batch_images.to(test_device)
+        points = batch_points[0].to(test_device).unsqueeze(0)
         pc = Pointclouds(points=points)
         
-        R = torch.eye(3).unsqueeze(0).to(device)
-        T = torch.tensor([[[0.0, 0.0, 2.0]]]).to(device)
-        camera = PerspectiveCameras(R=R, T=T, image_size=((512, 512),), device=device)
+        R = torch.eye(3).unsqueeze(0).to(test_device)
+        T = torch.tensor([[0.0, 0.0, 2.0]], dtype=torch.float32).to(test_device)
+        camera = PerspectiveCameras(R=R, T=T, image_size=((512, 512),), device=test_device)
         
-        mask = torch.ones(1, 1, 512, 512).to(device)
+        mask = torch.ones(1, 1, 512, 512).to(test_device)
         
         print(f"Input batch:")
         print(f"  image_rgb: {image_rgb.shape}")
         print(f"  points: {points.shape}")
         print(f"  mask: {mask.shape}")
         
+        # Create a FrameData batch
+        batch = FrameData(
+            sequence_point_cloud=pc,
+            camera=camera,
+            image_rgb=image_rgb,
+            fg_probability=mask,
+        )
+        
         # Try training forward pass (with ground truth points)
         print("\nRunning training forward pass (with ground truth)...")
         try:
-            loss = model(
-                pc=pc,
-                camera=camera,
-                image_rgb=image_rgb,
-                mask=mask,
-            )
-            print(f"✓ Training loss: {loss.item():.4f}")
+            loss = model(batch, mode='train')
+            print(f"[OK] Training loss: {loss.item():.4f}")
         except Exception as e:
             print(f"Training pass failed: {e}")
         
         # Try sampling (inference mode)
         print("\nRunning inference (sampling from noise)...")
         try:
-            output = model(
-                pc=None,  # Start from noise
-                camera=camera,
-                image_rgb=image_rgb,
-                mask=mask,
-                num_inference_steps=10,
-            )
-            
-            if isinstance(output, tuple):
-                output, all_outputs = output
+            output, all_outputs = model(batch, mode='sample', num_inference_steps=10, return_sample_every_n_steps=5)
             
             if isinstance(output, Pointclouds):
                 pred_points = output.points_packed()
-                print(f"✓ Generated point cloud shape: {pred_points.shape}")
+                print(f"[OK] Generated point cloud shape: {pred_points.shape}")
                 print(f"  Points: {pred_points.shape[0]}")
                 print(f"  X range: [{pred_points[:, 0].min():.2f}, {pred_points[:, 0].max():.2f}]")
                 print(f"  Y range: [{pred_points[:, 1].min():.2f}, {pred_points[:, 1].max():.2f}]")
@@ -192,18 +192,18 @@ try:
             traceback.print_exc()
     
     print("\n" + "="*60)
-    print("✓ MODEL TEST COMPLETE")
+    print("[OK] MODEL TEST COMPLETE")
     print("="*60)
     
 except ImportError as e:
-    print(f"✗ Import error: {e}")
+    print(f"[ERROR] Import error: {e}")
     print("\nTrying alternative import path...")
     try:
         from model import ConditionalPointCloudDiffusionModel
         from pytorch3d.structures import Pointclouds
         from pytorch3d.renderer.cameras import PerspectiveCameras
         
-        print("Model imports successful ✓")
+        print("Model imports successful [OK]")
         
         print("\nCreating model with image_size=512...")
         model = ConditionalPointCloudDiffusionModel(
@@ -227,7 +227,7 @@ except ImportError as e:
             point_cloud_model_embed_dim=64,
         ).to(device)
         
-        print("Model created successfully ✓")
+        print("Model created successfully [OK]")
         
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -237,7 +237,7 @@ except ImportError as e:
         model.eval()
         
         print("\n" + "="*60)
-        print("TESTING MODEL WITH 512×512 INPUT")
+        print("TESTING MODEL WITH 512x512 INPUT")
         print("="*60)
         
         with torch.no_grad():
@@ -264,18 +264,18 @@ except ImportError as e:
                     image_rgb=image_rgb,
                     mask=mask,
                 )
-                print(f"✓ Loss computed: {loss.item():.4f}")
+                print(f"[OK] Loss computed: {loss.item():.4f}")
             except Exception as e:
                 print(f"Error: {e}")
         
-        print("\n✓ Model handles 512×512 images correctly!")
+        print("\n[OK] Model handles 512x512 images correctly!")
         
     except Exception as e2:
-        print(f"✗ Alternative import also failed: {e2}")
+        print(f"[ERROR] Alternative import also failed: {e2}")
         import traceback
         traceback.print_exc()
 
 except Exception as e:
-    print(f"✗ Error: {e}")
+    print(f"[ERROR] Error: {e}")
     import traceback
     traceback.print_exc()

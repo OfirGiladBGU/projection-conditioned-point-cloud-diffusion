@@ -1,4 +1,11 @@
+import sys
+from pathlib import Path
 from typing import Optional, Union
+
+# Ensure parent directory is in path for absolute imports
+_parent = Path(__file__).parent.parent
+if str(_parent) not in sys.path:
+    sys.path.insert(0, str(_parent))
 
 import torch
 from diffusers.schedulers import DDIMScheduler, DDPMScheduler, PNDMScheduler
@@ -10,8 +17,8 @@ from pytorch3d.renderer.cameras import CamerasBase
 from pytorch3d.structures import Pointclouds
 from torch import Tensor
 
-from .feature_model import FeatureModel
-from .model_utils import compute_distance_transform
+from model.feature_model import FeatureModel
+from model.model_utils import compute_distance_transform
 
 SchedulerClass = Union[DDPMScheduler, DDIMScheduler, PNDMScheduler, LMSDiscreteScheduler]
 

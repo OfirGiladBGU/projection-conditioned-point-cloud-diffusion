@@ -1,4 +1,11 @@
+import sys
+from pathlib import Path
 from typing import Optional
+
+# Ensure parent directory is in path for absolute imports
+_parent = Path(__file__).parent.parent
+if str(_parent) not in sys.path:
+    sys.path.insert(0, str(_parent))
 
 import torch
 import torch.nn as nn
@@ -7,7 +14,7 @@ from diffusers import ModelMixin
 from torch import Tensor
 from timm.models.vision_transformer import Attention, LayerScale, DropPath, Mlp
 
-from .point_cloud_model import PointCloudModel
+from model.point_cloud_model import PointCloudModel
 
 
 class PointCloudModelBlock(nn.Module):

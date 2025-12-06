@@ -1,4 +1,11 @@
+import sys
+from pathlib import Path
 from typing import Optional
+
+# Ensure parent directory is in path for absolute imports
+_parent = Path(__file__).parent.parent
+if str(_parent) not in sys.path:
+    sys.path.insert(0, str(_parent))
 
 import torch
 import torch.nn.functional as F
@@ -7,8 +14,8 @@ from pytorch3d.renderer.cameras import CamerasBase
 from pytorch3d.structures import Pointclouds
 from torch import Tensor
 
-from .point_cloud_transformer_model import PointCloudTransformerModel
-from .projection_model import PointCloudProjectionModel
+from model.point_cloud_transformer_model import PointCloudTransformerModel
+from model.projection_model import PointCloudProjectionModel
 
 class PointCloudColoringModel(PointCloudProjectionModel):
     

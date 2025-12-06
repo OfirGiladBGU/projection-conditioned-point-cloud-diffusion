@@ -1,3 +1,11 @@
+import sys
+from pathlib import Path
+
+# Ensure parent directory is in path for absolute imports
+_parent = Path(__file__).parent.parent
+if str(_parent) not in sys.path:
+    sys.path.insert(0, str(_parent))
+
 from contextlib import nullcontext
 
 import torch
@@ -5,9 +13,7 @@ from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers import ModelMixin
 from torch import Tensor
 
-from .pvcnn.pvcnn import PVCNN2
-from .pvcnn.pvcnn_plus_plus import PVCNN2PlusPlus
-from .simple.simple_model import SimplePointModel
+from model.simple.simple_model import SimplePointModel
 
 
 class PointCloudModel(ModelMixin, ConfigMixin):
@@ -25,6 +31,8 @@ class PointCloudModel(ModelMixin, ConfigMixin):
         super().__init__()
         self.model_type = model_type
         if self.model_type == 'pvcnn':
+            # Lazy import to avoid requiring gcc/CUDA compilation if not used
+            from model.pvcnn.pvcnn import PVCNN2
             self.autocast_context = torch.autocast('cuda', dtype=torch.float32)
             self.model = PVCNN2(
                 embed_dim=embed_dim,
@@ -36,6 +44,8 @@ class PointCloudModel(ModelMixin, ConfigMixin):
             self.model.classifier[-1].bias.data.normal_(0, 1e-6)
             self.model.classifier[-1].weight.data.normal_(0, 1e-6)
         elif self.model_type == 'pvcnnplusplus':
+            # Lazy import to avoid requiring gcc/CUDA compilation if not used
+            from model.pvcnn.pvcnn_plus_plus import PVCNN2PlusPlus
             self.autocast_context = torch.autocast('cuda', dtype=torch.float32)
             self.model = PVCNN2PlusPlus(
                 embed_dim=embed_dim,

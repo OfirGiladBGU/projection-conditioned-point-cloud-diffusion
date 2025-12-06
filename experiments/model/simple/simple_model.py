@@ -1,9 +1,17 @@
+import sys
+from pathlib import Path
+
+# Ensure parent directory is in path for absolute imports
+_parent = Path(__file__).parent.parent.parent
+if str(_parent) not in sys.path:
+    sys.path.insert(0, str(_parent))
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import nn
 
-from .simple_model_utils import FeedForward, BasePointModel
+from model.simple.simple_model_utils import FeedForward, BasePointModel
 
 
 class SimplePointModel(BasePointModel):

@@ -11,9 +11,13 @@ import datetime
 import math
 import os
 import sys
+from pathlib import Path
+
+# Add experiments directory to path for relative imports
+sys.path.insert(0, str(Path(__file__).parent))
+
 import time
 from contextlib import nullcontext
-from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch

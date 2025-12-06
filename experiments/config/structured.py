@@ -87,7 +87,11 @@ class PointCloudDiffusionModelConfig(PointCloudProjectionModelConfig):
     beta_schedule: str = 'linear'  # 'custom'
 
     # Point cloud model arguments
-    point_cloud_model: str = 'pvcnn'
+    # point_cloud_model: str = 'pvcnn'
+    
+    # Changed default from 'pvcnn' to 'simple' to avoid CUDA compilation issues on Windows
+    # Users can override with point_cloud_model=pvcnn in config if CUDA build tools are available
+    point_cloud_model: str = 'simple'
     point_cloud_model_embed_dim: int = 64
 
 
@@ -121,7 +125,7 @@ class PointCloudDatasetConfig(DatasetConfig):
 @dataclass
 class CO3DConfig(PointCloudDatasetConfig):
     type: str = 'co3dv2'
-    root: str = os.getenv('CO3DV2_DATASET_ROOT')
+    root: Optional[str] = os.getenv('CO3DV2_DATASET_ROOT')
     category: str = 'hydrant'
     subset_name: str = 'fewview_dev'
     mask_images: bool = '${model.use_mask}'
