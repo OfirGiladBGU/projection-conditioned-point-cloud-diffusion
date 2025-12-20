@@ -157,9 +157,9 @@ try:
         
         # Create a FrameData batch
         batch = FrameData(
-            frame_number=0,
-            sequence_name="test_sequence",
-            sequence_category="test",
+            # frame_number=0,
+            # sequence_name="test_sequence",
+            # sequence_category="test",
             sequence_point_cloud=pc,
             camera=camera,
             image_rgb=image_rgb,

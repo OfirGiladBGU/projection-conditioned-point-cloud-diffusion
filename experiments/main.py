@@ -14,18 +14,6 @@ from accelerate import Accelerator
 from omegaconf import DictConfig, OmegaConf
 from torchvision.transforms import functional as TVF
 
-# Set CUDA environment variables
-# CUDA is bundled with PyTorch in the conda environment
-_conda_env_path = Path(sys.prefix)  # Gets the current conda environment path
-_cuda_path = _conda_env_path  # CUDA libraries are in the conda environment root
-if str(_conda_env_path) not in os.environ.get('PATH', ''):
-    os.environ['PATH'] = f"{_conda_env_path}\\Library\\bin;" + os.environ.get('PATH', '')
-os.environ['CUDA_PATH'] = str(_conda_env_path)
-# Set CUDA architecture list to avoid compilation warnings and enable proper CUDA extension loading
-# Using a common architecture that works across most NVIDIA cards
-os.environ['TORCH_CUDA_ARCH_LIST'] = '7.0;7.5;8.0;8.6;9.0'
-os.environ['CO3DV2_DATASET_ROOT'] = str(Path(__file__).parent.parent / 'co3d')
-
 import training_utils
 import diffusion_utils
 from dataset import get_dataset

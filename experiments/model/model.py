@@ -148,18 +148,20 @@ class ConditionalPointCloudDiffusionModel(PointCloudProjectionModel):
         # Loop over timesteps
         all_outputs = []
         return_all_outputs = (return_sample_every_n_steps > 0)
-        progress_bar = tqdm(scheduler.timesteps.to(device), desc=f'Sampling ({x_t.shape})', disable=disable_tqdm)
+        # Keep scheduler timesteps on CPU; use CUDA copy only for the model
+        progress_bar = tqdm(scheduler.timesteps, desc=f'Sampling ({x_t.shape})', disable=disable_tqdm)
         for i, t in enumerate(progress_bar):
             
             # Conditioning
+            t_device = t.to(device)
             x_t_input = self.get_input_with_conditioning(x_t, camera=camera,
-                image_rgb=image_rgb, mask=mask, t=t)
+                image_rgb=image_rgb, mask=mask, t=t_device)
             
             # Forward
-            noise_pred = self.point_cloud_model(x_t_input, t.reshape(1).expand(B))
+            noise_pred = self.point_cloud_model(x_t_input, t_device.reshape(1).expand(B))
 
             # Step
-            x_t = scheduler.step(noise_pred, t, x_t, **extra_step_kwargs).prev_sample
+            x_t = scheduler.step(noise_pred, t.cpu(), x_t, **extra_step_kwargs).prev_sample
 
             # Append to output list if desired
             if (return_all_outputs and (i % return_sample_every_n_steps == 0 or i == len(scheduler.timesteps) - 1)):

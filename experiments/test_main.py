@@ -54,18 +54,17 @@ except ImportError:
     ARCHITECTURE_AVAILABLE = False
     print("Warning: Could not import project architecture. Using basic model.")
 
-
-# Set CUDA environment variables
-# CUDA is bundled with PyTorch in the conda environment
-_conda_env_path = Path(sys.prefix)  # Gets the current conda environment path
-_cuda_path = _conda_env_path  # CUDA libraries are in the conda environment root
-if str(_conda_env_path) not in os.environ.get('PATH', ''):
-    os.environ['PATH'] = f"{_conda_env_path}\\Library\\bin;" + os.environ.get('PATH', '')
-os.environ['CUDA_PATH'] = str(_conda_env_path)
-# Set CUDA architecture list to avoid compilation warnings and enable proper CUDA extension loading
-# Using a common architecture that works across most NVIDIA cards
-os.environ['TORCH_CUDA_ARCH_LIST'] = '7.0;7.5;8.0;8.6;9.0'
-
+# Windows CUDA setup (uncomment if needed)
+# # Set CUDA environment variables
+# # CUDA is bundled with PyTorch in the conda environment
+# _conda_env_path = Path(sys.prefix)  # Gets the current conda environment path
+# if str(_conda_env_path) not in os.environ.get('PATH', ''):
+#     os.environ['PATH'] = f"{_conda_env_path}\\Library\\bin;" + os.environ.get('PATH', '')
+# os.environ['CUDA_PATH'] = str(_conda_env_path)
+# # Set CUDA architecture list to avoid compilation warnings and enable proper CUDA extension loading
+# # Using a common architecture that works across most NVIDIA cards
+# os.environ['TORCH_CUDA_ARCH_LIST'] = '7.0;7.5;8.0;8.6;9.0'
+# os.environ['CO3DV2_DATASET_ROOT'] = str(Path(__file__).parent.parent / 'co3d')
 
 # ============================================================================
 # CUSTOM DATASET
@@ -383,6 +382,9 @@ def train_step(
         camera=camera,
         image_rgb=image_rgb,
         fg_probability=mask,
+        # frame_number=0,
+        # sequence_name="train",
+        # sequence_category="custom",
     )
     loss = model(batch_fd, mode='train')
     
@@ -433,6 +435,9 @@ def validate(
                 camera=camera,
                 image_rgb=image_rgb,
                 fg_probability=mask,
+                # frame_number=0,
+                # sequence_name="val",
+                # sequence_category="custom",
             )
             loss = model(batch_fd, mode='train')
             
@@ -485,6 +490,9 @@ def predict(
                     camera=camera,
                     image_rgb=image_rgb,
                     fg_probability=mask,
+                    # frame_number=batch_idx,
+                    # sequence_name=names[0] if names else "test",
+                    # sequence_category="custom",
                 )
                 output, all_outputs = model(
                     batch_fd,
@@ -763,8 +771,8 @@ if __name__ == '__main__':
     # ========================================================================
     
     # Data paths
-    SOURCE_DIR = str(Path(r'D:\AllProjects\PycharmProjects\projection-conditioned-point-cloud-diffusion\data_grads_v3\source'))
-    TARGET_DIR = str(Path(r'D:\AllProjects\PycharmProjects\projection-conditioned-point-cloud-diffusion\data_grads_v3\target'))
+    SOURCE_DIR = str(Path(r'/groups/asharf_group/ofirgila/ControlNet/training/data_grads_v3/source'))
+    TARGET_DIR = str(Path(r'/groups/asharf_group/ofirgila/ControlNet/training/data_grads_v3/target'))
     
     # ========================================================================
     # HARDCODED PARAMETERS - CUSTOMIZE HERE
@@ -775,10 +783,10 @@ if __name__ == '__main__':
     NUM_POINTS = 5000  # Approximate points per cloud
     
     # Training parameters
-    BATCH_SIZE = 2
-    NUM_EPOCHS = 10
+    BATCH_SIZE = 6  # 2 for debug
+    NUM_EPOCHS = 2  # Recommended: 10+
     LEARNING_RATE = 1e-3
-    NUM_WORKERS = 0  # Set to 0 for debugging, increase for faster data loading
+    NUM_WORKERS = 6  # Set to 0 for debugging, increase for faster data loading
     
     # Model parameters
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
