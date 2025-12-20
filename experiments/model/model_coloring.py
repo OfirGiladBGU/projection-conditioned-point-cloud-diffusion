@@ -9,9 +9,7 @@ if str(_parent) not in sys.path:
 
 import torch
 import torch.nn.functional as F
-from pytorch3d.implicitron.dataset.data_loader_map_provider import FrameData
-from pytorch3d.renderer.cameras import CamerasBase
-from pytorch3d.structures import Pointclouds
+from p3d_fallback import FrameData, CamerasBase, Pointclouds
 from torch import Tensor
 
 from model.point_cloud_transformer_model import PointCloudTransformerModel

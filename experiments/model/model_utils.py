@@ -2,7 +2,8 @@ import cv2
 import numpy as np
 import torch
 import torch.nn as nn
-from pytorch3d.structures import Pointclouds
+
+from p3d_fallback import Pointclouds
 
 
 def set_requires_grad(module: nn.Module, requires_grad: bool):

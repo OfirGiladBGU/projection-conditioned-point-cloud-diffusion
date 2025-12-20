@@ -13,9 +13,7 @@ import torch.nn.functional as F
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusers.schedulers.scheduling_pndm import PNDMScheduler
-from pytorch3d.implicitron.dataset.data_loader_map_provider import FrameData
-from pytorch3d.renderer.cameras import CamerasBase
-from pytorch3d.structures import Pointclouds
+from p3d_fallback import FrameData, CamerasBase, Pointclouds
 from torch import Tensor
 from tqdm import tqdm
 

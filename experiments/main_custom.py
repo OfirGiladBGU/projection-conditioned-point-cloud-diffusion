@@ -33,14 +33,17 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
-try:
-    from pytorch3d.structures import Pointclouds
-    from pytorch3d.io import IO
-    from pytorch3d.renderer.cameras import PerspectiveCameras
-    from pytorch3d.implicitron.dataset.data_loader_map_provider import FrameData
-    PYTORCH3D_AVAILABLE = True
-except ImportError:
-    PYTORCH3D_AVAILABLE = False
+# Prefer a lightweight PyTorch3D-compatible layer that works without building
+# the actual C++ extensions. Falls back to pure PyTorch implementations that
+# still run on CUDA.
+from p3d_fallback import (
+    PYTORCH3D_AVAILABLE,
+    FrameData,
+    Pointclouds,
+    PointsRasterizer,
+    PointsRasterizationSettings,
+    PerspectiveCameras,
+)
 
 # Import project modules
 try:
@@ -139,14 +142,25 @@ class CustomPointCloudDataset(Dataset):
             return points
         
         elif pointcloud_path.suffix == '.ply':
-            # Using pytorch3d IO
-            if PYTORCH3D_AVAILABLE:
-                io = IO()
-                pointcloud = io.load_pointcloud(str(pointcloud_path))
-                points = pointcloud.points_packed()  # [N, 3]
+            # Prefer Open3D for fast GPU-friendly I/O; fall back to trimesh.
+            try:
+                import open3d as o3d
+
+                pc_o3d = o3d.io.read_point_cloud(str(pointcloud_path))
+                points = torch.from_numpy(np.asarray(pc_o3d.points)).float()
                 return points
-            else:
-                raise ImportError("PyTorch3D required for .ply files")
+            except Exception:
+                try:
+                    import trimesh
+
+                    mesh = trimesh.load(pointcloud_path, process=False)
+                    verts = np.asarray(mesh.vertices)
+                    points = torch.from_numpy(verts).float()
+                    return points
+                except Exception as exc:  # pragma: no cover - best-effort fallback
+                    raise ImportError(
+                        "Reading .ply requires open3d or trimesh; install one of them."
+                    ) from exc
         
         elif pointcloud_path.suffix == '.pth':
             data = torch.load(pointcloud_path)
@@ -197,20 +211,16 @@ class CustomPointCloudDataset(Dataset):
         
         # Create dummy camera (looking at origin)
         # For a simple orthographic camera
-        if PYTORCH3D_AVAILABLE:
-            # Create a perspective camera at distance 2 from origin
-            R = torch.eye(3).unsqueeze(0)
-            T = torch.tensor([[0.0, 0.0, 2.0]])  # shape (1,3)
-            camera = PerspectiveCameras(R=R, T=T, image_size=((self.image_size, self.image_size),))
-        else:
-            camera = None
+        R = torch.eye(3).unsqueeze(0)
+        T = torch.tensor([[0.0, 0.0, 2.0]])  # shape (1,3)
+        camera = PerspectiveCameras(R=R, T=T, image_size=((self.image_size, self.image_size),))
         
         # Create mask (all 1s, indicating all pixels are valid)
         mask = torch.ones(1, self.image_size, self.image_size)
         
         return {
             'image_rgb': image.unsqueeze(0),  # [1, 3, H, W] for batch compatibility
-            'sequence_point_cloud': Pointclouds(points=points.unsqueeze(0)) if PYTORCH3D_AVAILABLE else points.unsqueeze(0),
+            'sequence_point_cloud': Pointclouds(points=points.unsqueeze(0)),
             'camera': camera,
             'mask': mask.unsqueeze(0),  # [1, 1, H, W]
             'image_path': str(image_path),
@@ -227,26 +237,30 @@ def custom_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     # Collect point clouds
     pcs = [b['sequence_point_cloud'] for b in batch]
-    if PYTORCH3D_AVAILABLE:
-        # Each entry is Pointclouds of size (1,N,3) or tensor; normalize to tensor list
-        pts_list = []
-        for pc in pcs:
-            if isinstance(pc, Pointclouds):
-                pts_list.append(pc.points_padded()[0])
-            else:
-                pts_list.append(pc.squeeze(0))
-        sequence_point_cloud = Pointclouds(points=pts_list)
-    else:
-        sequence_point_cloud = torch.stack([pc.squeeze(0) for pc in pcs], dim=0)
+    pts_list = []
+    for pc in pcs:
+        if isinstance(pc, Pointclouds):
+            pts_list.append(pc.points_padded()[0])
+        else:
+            pts_list.append(pc.squeeze(0))
+    sequence_point_cloud = Pointclouds(points=pts_list)
 
     # Cameras: keep list (model can take list or None)
     cameras = [b['camera'] for b in batch]
     if all(c is None for c in cameras):
         cameras = None
-    elif PYTORCH3D_AVAILABLE:
+    elif cameras[0] is None:
+        cameras = None
+    else:
         R = torch.cat([c.R for c in cameras], dim=0)
         T = torch.cat([c.T for c in cameras], dim=0)
-        image_sizes = torch.stack([c.image_size[0] for c in cameras], dim=0).to(cameras[0].device)
+        image_sizes = []
+        for c in cameras:
+            if isinstance(c.image_size, torch.Tensor):
+                image_sizes.append(c.image_size[0] if c.image_size.dim() > 1 else c.image_size)
+            else:
+                image_sizes.append(torch.tensor(c.image_size))
+        image_sizes = torch.stack(image_sizes, dim=0).to(cameras[0].device)
         cameras = PerspectiveCameras(R=R, T=T, image_size=image_sizes, device=cameras[0].device)
 
     names = [b['name'] for b in batch]
@@ -363,24 +377,14 @@ def train_step(
     if camera is not None:
         camera = camera.to(device)
     
-    # Forward pass through diffusion model
-    # The model handles: noise injection, conditioning, and loss computation
-    if PYTORCH3D_AVAILABLE:
-        batch_fd = FrameData(
-            sequence_point_cloud=pc,
-            camera=camera,
-            image_rgb=image_rgb,
-            fg_probability=mask,
-        )
-        loss = model(batch_fd, mode='train')
-    else:
-        # Fallback: simple call expects batch dict (model may not support this path)
-        loss = model(
-            pc=pc,
-            camera=camera,
-            image_rgb=image_rgb,
-            mask=mask,
-        )
+    # Forward pass through diffusion model (uses fallback FrameData when PyTorch3D is missing)
+    batch_fd = FrameData(
+        sequence_point_cloud=pc,
+        camera=camera,
+        image_rgb=image_rgb,
+        fg_probability=mask,
+    )
+    loss = model(batch_fd, mode='train')
     
     # Backward pass
     optimizer.zero_grad()
@@ -424,21 +428,13 @@ def validate(
             if camera is not None:
                 camera = camera.to(device)
 
-            if PYTORCH3D_AVAILABLE:
-                batch_fd = FrameData(
-                    sequence_point_cloud=pc,
-                    camera=camera,
-                    image_rgb=image_rgb,
-                    fg_probability=mask,
-                )
-                loss = model(batch_fd, mode='train')
-            else:
-                loss = model(
-                    pc=pc,
-                    camera=camera,
-                    image_rgb=image_rgb,
-                    mask=mask,
-                )
+            batch_fd = FrameData(
+                sequence_point_cloud=pc,
+                camera=camera,
+                image_rgb=image_rgb,
+                fg_probability=mask,
+            )
+            loss = model(batch_fd, mode='train')
             
             losses.update(loss.item())
     
@@ -484,30 +480,18 @@ def predict(
             # Sample from diffusion model
             # Returns Pointclouds objects
             try:
-                if PYTORCH3D_AVAILABLE:
-                    batch_fd = FrameData(
-                        sequence_point_cloud=pc,
-                        camera=camera,
-                        image_rgb=image_rgb,
-                        fg_probability=mask,
-                    )
-                    output, all_outputs = model(
-                        batch_fd,
-                        mode='sample',
-                        num_inference_steps=num_inference_steps,
-                        return_sample_every_n_steps=10,
-                    )
-                else:
-                    output, all_outputs = model(
-                        batch=None,
-                        pc=None,
-                        camera=camera,
-                        image_rgb=image_rgb,
-                        mask=mask,
-                        mode='sample',
-                        num_inference_steps=num_inference_steps,
-                        return_sample_every_n_steps=10,
-                    )
+                batch_fd = FrameData(
+                    sequence_point_cloud=pc,
+                    camera=camera,
+                    image_rgb=image_rgb,
+                    fg_probability=mask,
+                )
+                output, all_outputs = model(
+                    batch_fd,
+                    mode='sample',
+                    num_inference_steps=num_inference_steps,
+                    return_sample_every_n_steps=10,
+                )
             except Exception as e:
                 print(f"Sampling failed: {e}")
                 print("Falling back to unconditional sampling...")
@@ -561,18 +545,20 @@ def main(
     """
     
     device = torch.device(device)
-    # Test if PyTorch3D rasterizer supports GPU
-    if PYTORCH3D_AVAILABLE and device.type == 'cuda':
+    # Test whether the rasterizer path can execute on CUDA (real or fallback)
+    if device.type == 'cuda':
         try:
             test_pc = torch.randn(1, 10, 3).to(device)
-            from pytorch3d.renderer import PointsRasterizer, PointsRasterizationSettings
             settings = PointsRasterizationSettings(image_size=64, radius=0.01, points_per_pixel=1)
             camera_test = PerspectiveCameras(device=device)
             rasterizer = PointsRasterizer(cameras=camera_test, raster_settings=settings)
             _ = rasterizer(Pointclouds(points=test_pc))
-            print("PyTorch3D GPU rasterization: ENABLED")
+            if PYTORCH3D_AVAILABLE:
+                print("PyTorch3D GPU rasterization: ENABLED")
+            else:
+                print("Fallback rasterizer (PyTorch-only) running on CUDA.")
         except RuntimeError as e:
-            if "Not compiled with GPU support" in str(e):
+            if PYTORCH3D_AVAILABLE and "Not compiled with GPU support" in str(e):
                 print("PyTorch3D rasterizer has no GPU support; forcing CPU for training.")
                 device = torch.device('cpu')
             else:

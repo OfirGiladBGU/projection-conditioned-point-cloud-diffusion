@@ -11,8 +11,8 @@ from torch.utils.data import Dataset, DataLoader
 import warnings
 warnings.filterwarnings('ignore')
 
-SOURCE_DIR = Path(r'D:\AllProjects\PycharmProjects\projection-conditioned-point-cloud-diffusion\data_grads_v3\source')
-TARGET_DIR = Path(r'D:\AllProjects\PycharmProjects\projection-conditioned-point-cloud-diffusion\data_grads_v3\target')
+SOURCE_DIR = Path(r'/groups/asharf_group/ofirgila/ControlNet/training/data_grads_v3/source')
+TARGET_DIR = Path(r'/groups/asharf_group/ofirgila/ControlNet/training/data_grads_v3/target')
 
 class SimpleDataset(Dataset):
     """Simplified dataset for testing"""
@@ -133,7 +133,7 @@ try:
     model.eval()
     
     # Use CPU device for inference (PyTorch3D rasterizer has no GPU support on Windows)
-    test_device = 'cpu'
+    test_device = 'cuda'  # 'cpu'
     print(f"Using device for test: {test_device} (PyTorch3D rasterizer limitation)")
     model = model.to(test_device)
     
@@ -157,6 +157,9 @@ try:
         
         # Create a FrameData batch
         batch = FrameData(
+            frame_number=0,
+            sequence_name="test_sequence",
+            sequence_category="test",
             sequence_point_cloud=pc,
             camera=camera,
             image_rgb=image_rgb,

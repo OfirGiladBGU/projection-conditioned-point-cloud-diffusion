@@ -54,8 +54,21 @@ class SimpleNearestNeighborsPointModel(BasePointModel):
     def __init__(self, num_neighbors: int = 4, **kwargs):
         self.num_neighbors = num_neighbors
         super().__init__(**kwargs)
-        from pytorch3d.ops import knn_points
-        self.knn_points = knn_points
+        self.knn_points = self._knn_points_torch
+
+    @staticmethod
+    def _knn_points_torch(p1: torch.Tensor, p2: torch.Tensor, K: int, return_nn: bool = False):
+        """Naive KNN in pure PyTorch (CUDA-capable via torch.cdist)."""
+        dists = torch.cdist(p1, p2)  # (B, N, N)
+        dists, idx = torch.topk(dists, k=K, dim=-1, largest=False)
+        neighbors = None
+        if return_nn:
+            neighbors = torch.gather(
+                p2.unsqueeze(1).expand(-1, p1.size(1), -1, p2.size(-1)),
+                2,
+                idx.unsqueeze(-1).expand(-1, -1, -1, p2.size(-1)),
+            )
+        return dists, idx, neighbors
 
     def get_layers(self):
         return nn.ModuleList([FeedForward(
@@ -76,7 +89,14 @@ class SimpleNearestNeighborsPointModel(BasePointModel):
 
         # Model
         for layer in self.layers:
-            x_neighbor = torch.stack([x_i[idx] for x_i, idx in zip(x, indices.reshape(B, N * K))]).reshape(B, N, K * D)
+            # Gather feature neighbors using the precomputed KNN indices
+            expand_idx = indices.unsqueeze(-1).expand(-1, -1, -1, D)
+            neighbor_feats = torch.gather(
+                x.unsqueeze(1).expand(-1, N, -1, D),
+                2,
+                expand_idx,
+            )  # (B, N, K, D)
+            x_neighbor = neighbor_feats.reshape(B, N, K * D)
             x_pool_max, x_pool_std = self.get_global_tensors(x)
             x_input = torch.cat((x_neighbor, x_pool_max, x_pool_std), dim=-1)  # (B, N, (3+K)*D)
             x = x + layer(x_input)  # (B, N, D_model)
