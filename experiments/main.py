@@ -14,6 +14,8 @@ from accelerate import Accelerator
 from omegaconf import DictConfig, OmegaConf
 from torchvision.transforms import functional as TVF
 
+os.environ['CO3DV2_DATASET_ROOT'] = str(Path(__file__).parent.parent / 'co3d')
+
 import training_utils
 import diffusion_utils
 from dataset import get_dataset
