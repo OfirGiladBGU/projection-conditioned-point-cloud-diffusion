@@ -14,7 +14,7 @@ warnings.filterwarnings('ignore')
 SOURCE_DIR = Path(r'/groups/asharf_group/ofirgila/ControlNet/training/data_grads_v3/source')
 TARGET_DIR = Path(r'/groups/asharf_group/ofirgila/ControlNet/training/data_grads_v3/target')
 CHECKPOINT_PATH = Path(r'/groups/asharf_group/ofirgila/projection-conditioned-point-cloud-diffusion/outputs/checkpoint_epoch_2.pth')
-OUTPUT_PATH = Path(r'/groups/asharf_group/ofirgila/projection-conditioned-point-cloud-diffusion/outputs/generated_output.png')
+PREDICT_DIR = Path(r'/groups/asharf_group/ofirgila/projection-conditioned-point-cloud-diffusion/outputs/predict')
 
 class SimpleDataset(Dataset):
     def __init__(self, source_dir, target_dir, image_size=512):
@@ -155,10 +155,16 @@ with torch.no_grad():
 
 # Convert points to binary PNG
 print("\n" + "="*60)
-print("CONVERTING TO BINARY PNG")
+print("CONVERTING TO BINARY PNG AND SAVING OUTPUTS")
 print("="*60)
 
-# Create blank image
+# Create predict directory
+PREDICT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Get the image name without extension
+image_name = name
+
+# Create blank image for prediction
 img_size = 512
 output_image = np.ones((img_size, img_size), dtype=np.uint8) * 255  # White background
 
@@ -189,14 +195,25 @@ y_normalized = np.clip(y_normalized, 0, img_size - 1)
 # Set points to black
 output_image[y_normalized, x_normalized] = 0
 
-# Save image
-OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-Image.fromarray(output_image).save(OUTPUT_PATH)
-
-print(f"Output saved to: {OUTPUT_PATH}")
+# Save predicted image
+predict_output_path = PREDICT_DIR / f"{image_name}_predict.png"
+Image.fromarray(output_image).save(predict_output_path)
+print(f"Predicted image saved to: {predict_output_path}")
 print(f"  Image size: {img_size}x{img_size}")
 print(f"  Black pixels: {(output_image == 0).sum()}")
 print(f"  White pixels: {(output_image == 255).sum()}")
+
+# Save source image
+source_output_path = PREDICT_DIR / f"{image_name}_source.png"
+Image.fromarray((image_tensor.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)).save(source_output_path)
+print(f"Source image saved to: {source_output_path}")
+
+# Save target (ground truth) image
+src_path, tgt_path = dataset.samples[0]
+target_img = Image.open(tgt_path).convert('RGB').resize((img_size, img_size), Image.Resampling.BILINEAR)
+target_output_path = PREDICT_DIR / f"{image_name}_target.png"
+target_img.save(target_output_path)
+print(f"Target (ground truth) image saved to: {target_output_path}")
 
 print("\n" + "="*60)
 print("[OK] INFERENCE COMPLETE")
