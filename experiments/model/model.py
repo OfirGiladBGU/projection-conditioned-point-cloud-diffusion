@@ -31,6 +31,7 @@ class ConditionalPointCloudDiffusionModel(PointCloudProjectionModel):
         beta_schedule: str,
         point_cloud_model: str,
         point_cloud_model_embed_dim: int,
+        loss_xy_only: bool = False,
         **kwargs,  # projection arguments
     ):
         super().__init__(**kwargs)
@@ -38,6 +39,9 @@ class ConditionalPointCloudDiffusionModel(PointCloudProjectionModel):
         # Checks
         if not self.predict_shape:
             raise NotImplementedError('Must predict shape if performing diffusion.')
+        
+        # Loss configuration
+        self.loss_xy_only = loss_xy_only
 
         # Create diffusion model schedulers which define the sampling timesteps
         scheduler_kwargs = {}
@@ -94,8 +98,23 @@ class ConditionalPointCloudDiffusionModel(PointCloudProjectionModel):
         if not noise_pred.shape == noise.shape:
             raise ValueError(f'{noise_pred.shape=} and {noise.shape=}')
         
-        # Loss
-        loss = F.mse_loss(noise_pred, noise)
+        # Loss - optionally only on XY coordinates (first 2 dims)
+        if self.loss_xy_only:
+            # Only compute loss on XY coordinates (first 2 dimensions of points)
+            # Keep full dimensions if color is predicted
+            xy_dims = 2  # X and Y only
+            if self.predict_color:
+                # Loss on XY + color channels
+                noise_pred_masked = noise_pred[:, :, :xy_dims + self.color_channels]
+                noise_masked = noise[:, :, :xy_dims + self.color_channels]
+            else:
+                # Loss on XY only
+                noise_pred_masked = noise_pred[:, :, :xy_dims]
+                noise_masked = noise[:, :, :xy_dims]
+            loss = F.mse_loss(noise_pred_masked, noise_masked)
+        else:
+            # Standard loss on all coordinates
+            loss = F.mse_loss(noise_pred, noise)
 
         # Whether to return intermediate steps
         if return_intermediate_steps:

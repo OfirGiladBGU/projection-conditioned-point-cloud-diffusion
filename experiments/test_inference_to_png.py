@@ -15,6 +15,7 @@ SOURCE_DIR = Path(r'/groups/asharf_group/ofirgila/ControlNet/training/data_grads
 TARGET_DIR = Path(r'/groups/asharf_group/ofirgila/ControlNet/training/data_grads_v3/target')
 CHECKPOINT_PATH = Path(r'/groups/asharf_group/ofirgila/projection-conditioned-point-cloud-diffusion/outputs/checkpoint_epoch_2.pth')
 PREDICT_DIR = Path(r'/groups/asharf_group/ofirgila/projection-conditioned-point-cloud-diffusion/outputs/predict')
+NUM_POINTS = 5000  # Number of points to generate
 
 class SimpleDataset(Dataset):
     def __init__(self, source_dir, target_dir, image_size=512):
@@ -87,6 +88,7 @@ model = ConditionalPointCloudDiffusionModel(
     beta_start=1e-5,
     beta_end=8e-3,
     beta_schedule='linear',
+    loss_xy_only=True,
     point_cloud_model='simple',
     point_cloud_model_embed_dim=64,
 ).to(device)
@@ -129,7 +131,7 @@ with torch.no_grad():
     mask = torch.ones(1, 1, 512, 512).to(device)
     
     # Create dummy point cloud for batch (will be replaced during sampling)
-    dummy_points = torch.zeros(1, 1000, 3).to(device)  # Batch of 1000 points
+    dummy_points = torch.zeros(1, NUM_POINTS, 3).to(device)  # Batch of NUM_POINTS points
     dummy_pc = Pointclouds(points=dummy_points)
     
     # Create batch
@@ -141,7 +143,7 @@ with torch.no_grad():
     )
     
     print("Sampling point cloud from noise...")
-    output, all_outputs = model(batch, mode='sample', num_inference_steps=50, return_sample_every_n_steps=10, num_points=1000)
+    output, all_outputs = model(batch, mode='sample', num_inference_steps=50, return_sample_every_n_steps=10, num_points=NUM_POINTS)
     
     if isinstance(output, Pointclouds):
         pred_points = output.points_packed().cpu().numpy()

@@ -300,7 +300,7 @@ class AverageMeter:
 # MODEL SETUP
 # ============================================================================
 
-def create_model(device: torch.device):
+def create_model(device: torch.device, num_points: int = 5000, loss_xy_only: bool = False):
     """Create the diffusion model using project architecture."""
     
     if not ARCHITECTURE_AVAILABLE:
@@ -332,6 +332,7 @@ def create_model(device: torch.device):
         beta_start=1e-5,
         beta_end=8e-3,
         beta_schedule='linear',
+        loss_xy_only=loss_xy_only,
         
         # Point cloud model
         # Use simple model to avoid CUDA extension compilation on Windows
@@ -452,6 +453,7 @@ def predict(
     dataloader: DataLoader,
     device: torch.device,
     output_dir: str = 'predictions',
+    num_points: int = 5000,
     num_inference_steps: int = 50,
 ) -> None:
     """
@@ -497,6 +499,7 @@ def predict(
                 output, all_outputs = model(
                     batch_fd,
                     mode='sample',
+                    num_points=num_points,
                     num_inference_steps=num_inference_steps,
                     return_sample_every_n_steps=10,
                 )
@@ -532,6 +535,8 @@ def main(
     num_workers: int = 4,
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
     mode: str = 'train',  # 'train' or 'predict'
+    num_points: int = 5000,
+    loss_xy_only: bool = False,
     checkpoint: Optional[str] = None,
     use_wandb: bool = False,
 ):
@@ -621,7 +626,7 @@ def main(
     # MODEL
     # ========================================================================
     print("\nInitializing model (PC^2 Architecture)...")
-    model = create_model(device)
+    model = create_model(device, num_points=num_points, loss_xy_only=loss_xy_only)
     
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -668,6 +673,7 @@ def main(
             dataloader=dataloader_val,
             device=device,
             output_dir=output_dir / 'predictions',
+            num_points=num_points,
         )
         print(f"\nPredictions saved to: {output_dir / 'predictions'}")
         return
@@ -790,6 +796,7 @@ if __name__ == '__main__':
     
     # Model parameters
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+    LOSS_XY_ONLY = True  # Set to True to only compute loss on XY coords (ignore Z)
     
     # Mode: 'train' or 'predict'
     MODE = 'train'
@@ -815,6 +822,8 @@ if __name__ == '__main__':
         num_workers=NUM_WORKERS,
         device=DEVICE,
         mode=MODE,
+        num_points=NUM_POINTS,
+        loss_xy_only=LOSS_XY_ONLY,
         checkpoint=CHECKPOINT,
         use_wandb=USE_WANDB,
     )
