@@ -46,9 +46,11 @@ class FeatureModel(ModelMixin, ConfigMixin):
         image_size: int = 224,
         model_name: str = 'vit_small_patch16_224_mae',
         global_pool: str = '',  # '' or 'token'
+        use_grayscale_normalization: bool = False,  # Use simple 0.5 mean/std for grayscale
     ) -> None:
         super().__init__()
         self.model_name = model_name
+        self.use_grayscale_normalization = use_grayscale_normalization
 
         # Identity
         if self.model_name == 'identity':
@@ -61,7 +63,15 @@ class FeatureModel(ModelMixin, ConfigMixin):
 
         # Model properties
         self.feature_dim = self.model.embed_dim
-        self.mean, self.std = NORMALIZATION[model_name]
+        
+        # Set normalization based on grayscale flag
+        if self.use_grayscale_normalization:
+            # Use simple normalization for grayscale: mean=0.5, std=0.5 for all channels
+            self.mean = (0.5, 0.5, 0.5)
+            self.std = (0.5, 0.5, 0.5)
+        else:
+            # Use ImageNet normalization
+            self.mean, self.std = NORMALIZATION[model_name]
 
         # # Modify MSN model with output head from training
         # if model_name.endswith('msn'):

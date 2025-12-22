@@ -300,7 +300,7 @@ class AverageMeter:
 # MODEL SETUP
 # ============================================================================
 
-def create_model(device: torch.device, num_points: int = 5000, loss_xy_only: bool = False):
+def create_model(device: torch.device, num_points: int = 5000, loss_xy_only: bool = False, use_grayscale_normalization: bool = False):
     """Create the diffusion model using project architecture."""
     
     if not ARCHITECTURE_AVAILABLE:
@@ -319,6 +319,7 @@ def create_model(device: torch.device, num_points: int = 5000, loss_xy_only: boo
         use_global_features=False,
         use_mask=True,
         use_distance_transform=True,
+        use_grayscale_normalization=use_grayscale_normalization,
         
         # Point cloud
         scale_factor=1.0,
@@ -537,6 +538,7 @@ def main(
     mode: str = 'train',  # 'train' or 'predict'
     num_points: int = 5000,
     loss_xy_only: bool = False,
+    use_grayscale_normalization: bool = False,
     checkpoint: Optional[str] = None,
     use_wandb: bool = False,
 ):
@@ -626,7 +628,7 @@ def main(
     # MODEL
     # ========================================================================
     print("\nInitializing model (PC^2 Architecture)...")
-    model = create_model(device, num_points=num_points, loss_xy_only=loss_xy_only)
+    model = create_model(device, num_points=num_points, loss_xy_only=loss_xy_only, use_grayscale_normalization=use_grayscale_normalization)
     
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -797,6 +799,7 @@ if __name__ == '__main__':
     # Model parameters
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     LOSS_XY_ONLY = True  # Set to True to only compute loss on XY coords (ignore Z)
+    USE_GRAYSCALE_NORMALIZATION = True  # Set to True to use 0.5/0.5 normalization for grayscale images
     
     # Mode: 'train' or 'predict'
     MODE = 'train'
@@ -824,6 +827,7 @@ if __name__ == '__main__':
         mode=MODE,
         num_points=NUM_POINTS,
         loss_xy_only=LOSS_XY_ONLY,
+        use_grayscale_normalization=USE_GRAYSCALE_NORMALIZATION,
         checkpoint=CHECKPOINT,
         use_wandb=USE_WANDB,
     )

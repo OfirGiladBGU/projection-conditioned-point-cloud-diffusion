@@ -79,6 +79,7 @@ model = ConditionalPointCloudDiffusionModel(
     use_global_features=False,
     use_mask=True,
     use_distance_transform=True,
+    use_grayscale_normalization=True,  # Use simple 0.5/0.5 normalization for grayscale
     scale_factor=1.0,
     colors_mean=0.5,
     colors_std=0.5,
