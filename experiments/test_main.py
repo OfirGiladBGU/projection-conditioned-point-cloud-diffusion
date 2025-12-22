@@ -792,7 +792,7 @@ if __name__ == '__main__':
     
     # Training parameters
     BATCH_SIZE = 6  # 2 for debug
-    NUM_EPOCHS = 2  # Recommended: 10+
+    NUM_EPOCHS = 10  # Recommended: 10+
     LEARNING_RATE = 1e-3
     NUM_WORKERS = 6  # Set to 0 for debugging, increase for faster data loading
     

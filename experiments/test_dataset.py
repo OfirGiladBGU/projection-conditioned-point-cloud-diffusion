@@ -10,10 +10,6 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 
-# Test parameters
-SOURCE_DIR = Path(r'/groups/asharf_group/ofirgila/ControlNet/training/data_grads_v3/source')
-TARGET_DIR = Path(r'/groups/asharf_group/ofirgila/ControlNet/training/data_grads_v3/target')
-
 class SimpleDataset(Dataset):
     """Simplified dataset for testing"""
     def __init__(self, source_dir, target_dir):
@@ -56,56 +52,64 @@ class SimpleDataset(Dataset):
         return img_tensor, points_tensor
 
 
-print(f"Source dir: {SOURCE_DIR}")
-print(f"Source exists: {SOURCE_DIR.exists()}")
-print(f"Source files: {len(list(SOURCE_DIR.glob('*.png')))}")
+def main():
+    print(f"Source dir: {SOURCE_DIR}")
+    print(f"Source exists: {SOURCE_DIR.exists()}")
+    print(f"Source files: {len(list(SOURCE_DIR.glob('*.png')))}")
 
-print(f"\nTarget dir: {TARGET_DIR}")
-print(f"Target exists: {TARGET_DIR.exists()}")
-print(f"Target files: {len(list(TARGET_DIR.glob('*.png')))}")
+    print(f"\nTarget dir: {TARGET_DIR}")
+    print(f"Target exists: {TARGET_DIR.exists()}")
+    print(f"Target files: {len(list(TARGET_DIR.glob('*.png')))}")
 
-# Create dataset
-print("\n--- Creating Dataset ---")
-dataset = SimpleDataset(SOURCE_DIR, TARGET_DIR)
-print(f"Dataset size: {len(dataset)}")
-print(f"Dataset samples (first 5): {[str(s[0].name) for s in dataset.samples[:5]]}")
+    # Create dataset
+    print("\n--- Creating Dataset ---")
+    dataset = SimpleDataset(SOURCE_DIR, TARGET_DIR)
+    print(f"Dataset size: {len(dataset)}")
+    print(f"Dataset samples (first 5): {[str(s[0].name) for s in dataset.samples[:5]]}")
 
-# Test single sample
-print("\n--- Testing Single Sample ---")
-try:
-    image, points = dataset[0]
-    print(f"Image shape: {image.shape}")
-    print(f"Image dtype: {image.dtype}")
-    print(f"Image min/max: {image.min():.3f} / {image.max():.3f}")
-    print(f"Points shape: {points.shape}")
-    print(f"Points dtype: {points.dtype}")
-    if points.shape[0] > 0:
-        print(f"Points min: {points.min(dim=0).values}")
-        print(f"Points max: {points.max(dim=0).values}")
-    else:
-        print("WARNING: No points found in this sample!")
-    print("✓ Sample loaded successfully")
-except Exception as e:
-    print(f"✗ Error loading sample: {e}")
-    import traceback
-    traceback.print_exc()
+    # Test single sample
+    print("\n--- Testing Single Sample ---")
+    try:
+        image, points = dataset[0]
+        print(f"Image shape: {image.shape}")
+        print(f"Image dtype: {image.dtype}")
+        print(f"Image min/max: {image.min():.3f} / {image.max():.3f}")
+        print(f"Points shape: {points.shape}")
+        print(f"Points dtype: {points.dtype}")
+        if points.shape[0] > 0:
+            print(f"Points min: {points.min(dim=0).values}")
+            print(f"Points max: {points.max(dim=0).values}")
+        else:
+            print("WARNING: No points found in this sample!")
+        print("✓ Sample loaded successfully")
+    except Exception as e:
+        print(f"✗ Error loading sample: {e}")
+        import traceback
+        traceback.print_exc()
 
-# Test batch loading
-print("\n--- Testing Batch Loading ---")
-try:
-    loader = DataLoader(dataset, batch_size=2, shuffle=False, num_workers=0, 
-                       collate_fn=lambda x: (torch.stack([item[0] for item in x]), 
-                                            [item[1] for item in x]))
-    batch_images, batch_points = next(iter(loader))
-    print(f"Batch images shape: {batch_images.shape}")
-    print(f"Batch points list length: {len(batch_points)}")
-    print(f"First point cloud in batch shape: {batch_points[0].shape}")
-    if batch_points[0].shape[0] > 0:
-        print(f"First point cloud - points range: {batch_points[0].min(dim=0).values} to {batch_points[0].max(dim=0).values}")
-    print("✓ Batch loading successful")
-except Exception as e:
-    print(f"✗ Error in batch loading: {e}")
-    import traceback
-    traceback.print_exc()
+    # Test batch loading
+    print("\n--- Testing Batch Loading ---")
+    try:
+        loader = DataLoader(dataset, batch_size=2, shuffle=False, num_workers=0, 
+                        collate_fn=lambda x: (torch.stack([item[0] for item in x]), 
+                                                [item[1] for item in x]))
+        batch_images, batch_points = next(iter(loader))
+        print(f"Batch images shape: {batch_images.shape}")
+        print(f"Batch points list length: {len(batch_points)}")
+        print(f"First point cloud in batch shape: {batch_points[0].shape}")
+        if batch_points[0].shape[0] > 0:
+            print(f"First point cloud - points range: {batch_points[0].min(dim=0).values} to {batch_points[0].max(dim=0).values}")
+        print("✓ Batch loading successful")
+    except Exception as e:
+        print(f"✗ Error in batch loading: {e}")
+        import traceback
+        traceback.print_exc()
 
-print("\n--- All tests passed! Dataset is ready. ---")
+    print("\n--- All tests passed! Dataset is ready. ---")
+
+
+if __name__ == "__main__":
+    # Test parameters
+    SOURCE_DIR = Path(r'/groups/asharf_group/ofirgila/ControlNet/training/data_grads_v3/source')
+    TARGET_DIR = Path(r'/groups/asharf_group/ofirgila/ControlNet/training/data_grads_v3/target')
+    main()
