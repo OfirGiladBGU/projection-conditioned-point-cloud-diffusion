@@ -90,12 +90,14 @@ class CustomPointCloudDataset(Dataset):
         image_extensions: Tuple[str, ...] = ('.jpg', '.jpeg', '.png'),
         pointcloud_extensions: Tuple[str, ...] = ('.jpg', '.jpeg', '.png', '.ply', '.pth', '.npy'),
         image_size: int = 256,
+        use_cnn_extractor: bool = False,
     ):
         self.source_dir = Path(source_dir)
         self.target_dir = Path(target_dir)
         self.image_extensions = image_extensions
         self.pointcloud_extensions = pointcloud_extensions
         self.image_size = image_size
+        self.use_cnn_extractor = use_cnn_extractor
         
         # Get list of image files
         self.image_files = []
@@ -120,8 +122,13 @@ class CustomPointCloudDataset(Dataset):
         img = img.resize((self.image_size, self.image_size), Image.Resampling.BILINEAR)
         # Convert to tensor [0, 1]
         img_tensor = torch.from_numpy(np.array(img)).float() / 255.0
-        # Expand to 3 channels for compatibility with model
-        img_tensor = img_tensor.unsqueeze(0).repeat(3, 1, 1)  # [3, H, W]
+        
+        if self.use_cnn_extractor:
+            # Keep as single channel for CNN
+            img_tensor = img_tensor.unsqueeze(0)  # [1, H, W]
+        else:
+            # Expand to 3 channels for ImageNet-pretrained ViT
+            img_tensor = img_tensor.unsqueeze(0).repeat(3, 1, 1)  # [3, H, W]
         return img_tensor
     
     def _load_pointcloud(self, pointcloud_path: Path) -> torch.Tensor:
@@ -300,7 +307,7 @@ class AverageMeter:
 # MODEL SETUP
 # ============================================================================
 
-def create_model(device: torch.device, num_points: int = 5000, loss_xy_only: bool = False, use_grayscale_normalization: bool = False):
+def create_model(device: torch.device, num_points: int = 5000, loss_xy_only: bool = False, use_grayscale_normalization: bool = False, use_cnn_extractor: bool = False):
     """Create the diffusion model using project architecture."""
     
     if not ARCHITECTURE_AVAILABLE:
@@ -320,6 +327,8 @@ def create_model(device: torch.device, num_points: int = 5000, loss_xy_only: boo
         use_mask=True,
         use_distance_transform=True,
         use_grayscale_normalization=use_grayscale_normalization,
+        use_cnn_extractor=use_cnn_extractor,  # NEW: flag for CNN feature extractor
+        image_color_channels=1 if use_cnn_extractor else 3,  # NEW: 1 channel for grayscale CNN, 3 for RGB ViT
         
         # Point cloud
         scale_factor=1.0,
@@ -539,6 +548,7 @@ def main(
     num_points: int = 5000,
     loss_xy_only: bool = False,
     use_grayscale_normalization: bool = False,
+    use_cnn_extractor: bool = False,  # NEW: Use SimpleCNNFeatureExtractor
     checkpoint: Optional[str] = None,
     use_wandb: bool = False,
 ):
@@ -594,6 +604,7 @@ def main(
         source_dir=source_dir,
         target_dir=target_dir,
         image_size=512,
+        use_cnn_extractor=use_cnn_extractor,
     )
     
     # Split into train/val
@@ -628,7 +639,7 @@ def main(
     # MODEL
     # ========================================================================
     print("\nInitializing model (PC^2 Architecture)...")
-    model = create_model(device, num_points=num_points, loss_xy_only=loss_xy_only, use_grayscale_normalization=use_grayscale_normalization)
+    model = create_model(device, num_points=num_points, loss_xy_only=loss_xy_only, use_grayscale_normalization=use_grayscale_normalization, use_cnn_extractor=use_cnn_extractor)
     
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -792,7 +803,7 @@ if __name__ == '__main__':
     
     # Training parameters
     BATCH_SIZE = 6  # 2 for debug
-    NUM_EPOCHS = 10  # Recommended: 10+
+    NUM_EPOCHS = 2  # SHORT TEST: 2 epochs to verify CNN feature extractor improvement
     LEARNING_RATE = 1e-3
     NUM_WORKERS = 6  # Set to 0 for debugging, increase for faster data loading
     
@@ -800,6 +811,7 @@ if __name__ == '__main__':
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     LOSS_XY_ONLY = True  # Set to True to only compute loss on XY coords (ignore Z)
     USE_GRAYSCALE_NORMALIZATION = True  # Set to True to use 0.5/0.5 normalization for grayscale images
+    USE_CNN_EXTRACTOR = True  # NEW: Set to True to use SimpleCNNFeatureExtractor instead of ViT
     
     # Mode: 'train' or 'predict'
     MODE = 'train'
@@ -828,6 +840,7 @@ if __name__ == '__main__':
         num_points=NUM_POINTS,
         loss_xy_only=LOSS_XY_ONLY,
         use_grayscale_normalization=USE_GRAYSCALE_NORMALIZATION,
+        use_cnn_extractor=USE_CNN_EXTRACTOR,  # NEW: pass CNN extractor flag
         checkpoint=CHECKPOINT,
         use_wandb=USE_WANDB,
     )

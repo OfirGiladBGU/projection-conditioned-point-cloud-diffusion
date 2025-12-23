@@ -37,20 +37,27 @@ class SimpleDataset(Dataset):
         img = Image.open(src_path).convert('L')
         img = img.resize((self.image_size, self.image_size), Image.Resampling.BILINEAR)
         img_array = np.array(img, dtype=np.float32) / 255.0
-        img_tensor = torch.from_numpy(np.stack([img_array] * 3, axis=0))
+        
+        # Keep as grayscale if using CNN, expand to 3 channels for ViT
+        if hasattr(self, 'use_cnn_extractor') and self.use_cnn_extractor:
+            img_tensor = torch.from_numpy(img_array[np.newaxis, :, :])  # [1, H, W]
+        else:
+            img_tensor = torch.from_numpy(np.stack([img_array] * 3, axis=0))  # [3, H, W]
         
         return img_tensor, src_path.stem
 
 
-def main():
+def main(use_cnn_extractor=False):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
+    print(f"Using CNN feature extractor: {use_cnn_extractor}")
 
     # Load dataset
     print("\n" + "="*60)
     print("LOADING DATASET")
     print("="*60)
     dataset = SimpleDataset(SOURCE_DIR, TARGET_DIR, image_size=512)
+    dataset.use_cnn_extractor = use_cnn_extractor  # Pass flag to dataset
     print(f"Dataset size: {len(dataset)}")
     num_images = min(NUM_IMAGES_TO_PROCESS, len(dataset))
     indices = random.sample(range(len(dataset)), k=num_images)
@@ -76,6 +83,8 @@ def main():
         use_mask=True,
         use_distance_transform=True,
         use_grayscale_normalization=True,  # Use simple 0.5/0.5 normalization for grayscale
+        use_cnn_extractor=use_cnn_extractor,  # NEW: flag for CNN feature extractor
+        image_color_channels=1 if use_cnn_extractor else 3,  # NEW: 1 for grayscale CNN, 3 for RGB ViT
         scale_factor=1.0,
         colors_mean=0.5,
         colors_std=0.5,
@@ -239,7 +248,14 @@ def main():
                 print(f"  White pixels: {(output_image == 255).sum()}")
 
                 source_output_path = PREDICT_DIR / f"{image_name}_source.png"
-                Image.fromarray((image_tensor.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)).save(source_output_path)
+                if image_tensor.shape[0] == 1:
+                    # Grayscale image
+                    source_img_array = (image_tensor.cpu().numpy()[0] * 255).astype(np.uint8)
+                    Image.fromarray(source_img_array, mode='L').save(source_output_path)
+                else:
+                    # RGB image
+                    source_img_array = (image_tensor.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
+                    Image.fromarray(source_img_array).save(source_output_path)
                 print(f"Source image saved to: {source_output_path}")
 
                 src_path, tgt_path = dataset.samples[idx_local]
@@ -255,10 +271,18 @@ def main():
 if __name__ == "__main__":
     SOURCE_DIR = Path(r'/groups/asharf_group/ofirgila/ControlNet/training/data_grads_v3/source')
     TARGET_DIR = Path(r'/groups/asharf_group/ofirgila/ControlNet/training/data_grads_v3/target')
-    CHECKPOINT_PATH = Path(r'/groups/asharf_group/ofirgila/projection-conditioned-point-cloud-diffusion/outputs/checkpoint_epoch_8.pth')
+    CHECKPOINT_PATH = Path(r'/groups/asharf_group/ofirgila/projection-conditioned-point-cloud-diffusion/outputs/checkpoint_epoch_2.pth')
     PREDICT_DIR = Path(r'/groups/asharf_group/ofirgila/projection-conditioned-point-cloud-diffusion/outputs/predict')
     NUM_POINTS = 5000  # Number of points to generate
     NUM_IMAGES_TO_PROCESS = 10  # For testing, process only first N image
     BATCH_SIZE = 4  # Batch size for batched prediction
     CLEAN_PREDICT_DIR = True  # Whether to clean output directory before saving
-    main()
+    
+    # ====================
+    # Model Architecture
+    # ====================
+    # Set to True to use SimpleCNNFeatureExtractor (trained from scratch on grayscale)
+    # Set to False to use ImageNet-pretrained ViT (old default)
+    USE_CNN_EXTRACTOR = True
+    
+    main(use_cnn_extractor=USE_CNN_EXTRACTOR)

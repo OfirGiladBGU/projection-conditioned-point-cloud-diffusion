@@ -38,6 +38,7 @@ class PointCloudProjectionModel(ModelMixin):
         use_mask: bool = True,
         use_distance_transform: bool = True,
         use_grayscale_normalization: bool = False,
+        use_cnn_extractor: bool = False,  # NEW: Use SimpleCNNFeatureExtractor
         predict_shape: bool = True,
         predict_color: bool = False,
         process_color: bool = False,
@@ -60,6 +61,7 @@ class PointCloudProjectionModel(ModelMixin):
         self.use_mask = use_mask
         self.use_distance_transform = use_distance_transform
         self.use_grayscale_normalization = use_grayscale_normalization
+        self.use_cnn_extractor = use_cnn_extractor  # NEW
         self.predict_shape = predict_shape
         self.predict_color = predict_color
         self.process_color = process_color
@@ -73,7 +75,7 @@ class PointCloudProjectionModel(ModelMixin):
         self.use_global_conditioning = self.use_global_features
 
         # Create feature model
-        self.feature_model = FeatureModel(image_size, image_feature_model, use_grayscale_normalization=use_grayscale_normalization)
+        self.feature_model = FeatureModel(image_size, image_feature_model, use_grayscale_normalization=use_grayscale_normalization, use_cnn_extractor=use_cnn_extractor)
 
         # Input size
         self.in_channels = 3  # 3 for 3D point positions

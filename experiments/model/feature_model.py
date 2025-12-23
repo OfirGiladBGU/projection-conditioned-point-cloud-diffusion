@@ -10,6 +10,76 @@ from torch import Tensor
 from torchvision.transforms import functional as TVF
 
 
+class SimpleCNNFeatureExtractor(nn.Module):
+    """
+    Simple CNN feature extractor trained from scratch for grayscale gradient images.
+    Outputs both spatial features (B, D, H, W) and global features (B, D).
+    """
+    def __init__(self, in_channels=1, feature_dim=384, image_size=512):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.in_channels = in_channels
+        
+        # Encoder: progressively downsamples while increasing channels
+        self.encoder = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=7, stride=2, padding=3),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            
+            nn.Conv2d(32, 64, kernel_size=5, stride=2, padding=2),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            
+            nn.Conv2d(256, feature_dim, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(feature_dim),
+            nn.ReLU(inplace=True),
+        )
+        
+        # Global pooling for cls token equivalent
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+        
+    def forward(self, x):
+        """
+        Args:
+            x: (B, C, H, W) input image
+            
+        Returns:
+            spatial_features: (B, D, H, W) - upscaled spatial features
+            global_features: (B, D) - global pooled features
+        """
+        B, C, H, W = x.shape
+        
+        # Get spatial features through encoder
+        spatial_features = self.encoder(x)  # (B, D, H//16, W//16)
+        
+        # Get global features via adaptive pooling
+        global_features = self.global_pool(spatial_features)  # (B, D, 1, 1)
+        global_features = global_features.squeeze(-1).squeeze(-1)  # (B, D)
+        
+        # Upsample spatial features to original resolution
+        spatial_features = F.interpolate(
+            spatial_features, size=(H, W), mode='bilinear', align_corners=False
+        )  # (B, D, H, W)
+        
+        return spatial_features, global_features
+    
+    def normalize(self, img: Tensor):
+        """Normalize grayscale images to [-1, 1]"""
+        return (img - 0.5) / 0.5
+    
+    def denormalize(self, img: Tensor):
+        """Denormalize from [-1, 1] to [0, 1]"""
+        return torch.clip(img * 0.5 + 0.5, 0, 1)
+
+
 IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
 
@@ -47,15 +117,32 @@ class FeatureModel(ModelMixin, ConfigMixin):
         model_name: str = 'vit_small_patch16_224_mae',
         global_pool: str = '',  # '' or 'token'
         use_grayscale_normalization: bool = False,  # Use simple 0.5 mean/std for grayscale
+        use_cnn_extractor: bool = False,  # NEW: Use SimpleCNNFeatureExtractor instead of ViT
     ) -> None:
         super().__init__()
         self.model_name = model_name
         self.use_grayscale_normalization = use_grayscale_normalization
+        self.use_cnn_extractor = use_cnn_extractor
+        self.is_cnn = use_cnn_extractor
 
         # Identity
         if self.model_name == 'identity':
             return
 
+        # NEW: Use SimpleCNNFeatureExtractor
+        if use_cnn_extractor:
+            self.model = SimpleCNNFeatureExtractor(
+                in_channels=1, 
+                feature_dim=384,  # Match ViT feature dim for compatibility
+                image_size=image_size
+            )
+            self.feature_dim = 384
+            self.mean = (0.5, 0.5, 0.5)
+            self.std = (0.5, 0.5, 0.5)
+            self.fc = nn.Identity()
+            return
+
+        # Original ViT path
         # Create model
         self.model = VisionTransformer(
             img_size=image_size, num_classes=0, global_pool=global_pool,
@@ -141,8 +228,24 @@ class FeatureModel(ModelMixin, ConfigMixin):
         if self.model_name == 'identity':
             return x
         
-        # Normalize and forward
         B, C, H, W = x.shape
+        
+        # NEW: CNN path
+        if self.use_cnn_extractor:
+            x_norm = self.model.normalize(x)
+            spatial_features, global_features = self.model(x_norm)
+            # spatial_features: (B, D, H, W) already at original resolution
+            # global_features: (B, D)
+            
+            if return_type == 'cls_token':
+                return global_features
+            elif return_type == 'features':
+                return spatial_features
+            else:  # 'all'
+                return global_features, spatial_features
+        
+        # Original ViT path
+        # Normalize and forward
         x = self.normalize(x)
         feats = self.model(x)
 
