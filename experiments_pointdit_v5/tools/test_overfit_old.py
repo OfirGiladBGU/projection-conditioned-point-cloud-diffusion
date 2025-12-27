@@ -16,7 +16,7 @@ except Exception:
     MATPLOTLIB_AVAILABLE = False
 
 from config import Config
-from dataset import SimpleImageDataset
+from dataset import FastStipplingDataset
 from diffusion import DDPMScheduler, sample, train_step
 from model import PointDiT
 
@@ -113,11 +113,12 @@ scheduler = DDPMScheduler(
 if not os.path.isdir(config.data.source_dir):
     raise FileNotFoundError(f"Source dir not found: {config.data.source_dir}")
 
-dataset = SimpleImageDataset(
+dataset = FastStipplingDataset(
     source_dir=config.data.source_dir,
-    target_dir=config.data.target_dir,
     image_size=config.data.image_size,
     num_points=config.model.n_points,
+    density_power=config.data.density_power,
+    jitter=config.data.jitter,
 )
 
 if args.sample_index < 0 or args.sample_index >= len(dataset):

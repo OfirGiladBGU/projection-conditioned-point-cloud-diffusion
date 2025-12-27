@@ -58,19 +58,9 @@ class DataConfig:
     """Dataset configuration."""
 
     source_dir: str = "/groups/asharf_group/ofirgila/ControlNet/training/fill50k-gs/source"
-
-    dataset_type: Literal["voronoi", "fast"] = "fast"  # Start with fast, switch to voronoi
-
+    target_dir: str = "/groups/asharf_group/ofirgila/ControlNet/training/fill50k-gs/target"
     image_size: int = 512
     num_points: int = 2048
-
-    # Voronoi stippling params
-    lloyd_iterations: int = 20
-    density_power: float = 2.0
-
-    # Fast stippling params
-    jitter: float = 0.5
-
     val_split: float = 0.1
 
 

@@ -111,19 +111,16 @@ def main():
     
     # Create dataloaders
     print(f"Loading dataset from: {config.data.source_dir}")
-    print(f"Dataset type: {config.data.dataset_type}")
+    print(f"Target directory: {config.data.target_dir}")
     
     train_loader, val_loader = create_dataloaders(
         source_dir=config.data.source_dir,
+        target_dir=config.data.target_dir,
         batch_size=config.training.batch_size,
         num_workers=config.num_workers,
         val_split=config.data.val_split,
-        dataset_type=config.data.dataset_type,
         image_size=config.data.image_size,
         num_points=config.data.num_points,
-        lloyd_iterations=config.data.lloyd_iterations,
-        density_power=config.data.density_power,
-        jitter=config.data.jitter,
     )
     
     print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")

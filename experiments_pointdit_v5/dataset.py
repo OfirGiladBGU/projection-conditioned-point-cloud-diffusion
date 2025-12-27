@@ -1,6 +1,6 @@
-"""Dataset with Voronoi stippling / Lloyd's algorithm for blue noise ground truth.
+"""Simple dataset for loading images and point clouds from paired source/target images.
 
-This generates high-quality stipple distributions that the model learns to replicate.
+For synthetic stippling datasets, see tools/synthetic_dataset/
 """
 
 import torch
@@ -8,167 +8,17 @@ from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 from PIL import Image
 import numpy as np
-from typing import Literal, Union, Tuple
-from scipy.spatial import Voronoi
-import cv2
+from typing import Tuple, Optional
 
 
-class VoronoiStipplingDataset(Dataset):
-    """Generate ground truth stippling using Lloyd's relaxation (Voronoi)."""
+class SimpleImageDataset(Dataset):
+    """Load paired source images and target stippling masks.
     
-    def __init__(
-        self,
-        source_dir: str,
-        image_size: int = 512,
-        num_points: int = 2048,
-        lloyd_iterations: int = 20,
-        density_power: float = 2.0,
-    ):
-        """
-        Args:
-            source_dir: Directory with grayscale images
-            image_size: Resize images to this size
-            num_points: Number of stipple points to generate
-            lloyd_iterations: Number of Lloyd relaxation iterations
-            density_power: Power for density weighting (higher = more contrast)
-        """
-        self.source_dir = Path(source_dir)
-        self.image_size = image_size
-        self.num_points = num_points
-        self.lloyd_iterations = lloyd_iterations
-        self.density_power = density_power
-        
-        # Find all images
-        self.image_paths = self._list_images(self.source_dir)
-        if not self.image_paths:
-            raise ValueError(f"No images found in {source_dir}")
-        
-        print(f"VoronoiStipplingDataset: {len(self.image_paths)} images")
+    This dataset expects:
+    - source_dir: Directory with grayscale input images
+    - target_dir: Directory with binary stippling masks (black pixels = stipple points)
     
-    def __len__(self) -> int:
-        return len(self.image_paths)
-    
-    def __getitem__(self, idx: int) -> dict:
-        """Generate stippling for an image using Lloyd's algorithm."""
-        img_path = self.image_paths[idx]
-        
-        # Load and preprocess image
-        img = Image.open(img_path).convert('L').resize(
-            (self.image_size, self.image_size), Image.BILINEAR
-        )
-        img_np = np.asarray(img, dtype=np.float32) / 255.0
-        
-        # Generate density map (inverted: dark areas = more points)
-        density = 1.0 - img_np
-        density = np.power(density, self.density_power)
-        density = density / (density.sum() + 1e-6)  # Normalize
-        
-        # Generate stipple points using weighted Voronoi
-        points = self._lloyd_relaxation(density, self.num_points, self.lloyd_iterations)
-        
-        # Normalize to [-1, 1]
-        points_norm = (points / (self.image_size - 1)) * 2.0 - 1.0
-        
-        return {
-            'image': torch.from_numpy(img_np).float().unsqueeze(0),  # (1, H, W)
-            'points': torch.from_numpy(points_norm).float(),  # (N, 2)
-        }
-    
-    def _lloyd_relaxation(
-        self,
-        density: np.ndarray,
-        num_points: int,
-        iterations: int,
-    ) -> np.ndarray:
-        """
-        Lloyd's algorithm for weighted Voronoi stippling.
-        
-        Args:
-            density: (H, W) density map (higher = more points)
-            num_points: Target number of points
-            iterations: Number of relaxation iterations
-        
-        Returns:
-            (N, 2) point coordinates in pixel space [0, size-1]
-        """
-        H, W = density.shape
-        
-        # Initialize points: weighted random sampling
-        flat_density = density.ravel()
-        flat_density = flat_density / (flat_density.sum() + 1e-6)
-        
-        indices = np.random.choice(
-            H * W,
-            size=num_points,
-            replace=False,
-            p=flat_density,
-        )
-        
-        ys, xs = np.unravel_index(indices, (H, W))
-        points = np.stack([xs, ys], axis=-1).astype(np.float32)
-        
-        # Lloyd relaxation: iteratively move points to density-weighted centroids
-        for _ in range(iterations):
-            points = self._lloyd_step(points, density)
-        
-        return points
-    
-    def _lloyd_step(
-        self,
-        points: np.ndarray,
-        density: np.ndarray,
-    ) -> np.ndarray:
-        """
-        Single Lloyd relaxation step.
-        
-        Each point moves to the density-weighted centroid of its Voronoi cell.
-        """
-        H, W = density.shape
-        
-        # Build KD-tree equivalent: for each pixel, find nearest point
-        ys, xs = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
-        pixels = np.stack([xs.ravel(), ys.ravel()], axis=-1)  # (H*W, 2)
-        
-        # Compute distances to all points (vectorized)
-        # points: (N, 2), pixels: (H*W, 2)
-        dists = np.linalg.norm(
-            pixels[:, None, :] - points[None, :, :], axis=2
-        )  # (H*W, N)
-        
-        nearest = np.argmin(dists, axis=1)  # (H*W,)
-        
-        # For each point, compute weighted centroid of its cell
-        new_points = np.zeros_like(points)
-        weights = density.ravel()
-        
-        for i in range(len(points)):
-            mask = (nearest == i)
-            if mask.sum() == 0:
-                # No pixels assigned to this point, keep it
-                new_points[i] = points[i]
-            else:
-                cell_pixels = pixels[mask]
-                cell_weights = weights[mask]
-                # Weighted centroid
-                new_points[i] = (cell_pixels * cell_weights[:, None]).sum(axis=0) / (cell_weights.sum() + 1e-6)
-        
-        # Clamp to image bounds
-        new_points[:, 0] = np.clip(new_points[:, 0], 0, W - 1)
-        new_points[:, 1] = np.clip(new_points[:, 1], 0, H - 1)
-        
-        return new_points.astype(np.float32)
-    
-    @staticmethod
-    def _list_images(directory: Path):
-        exts = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'}
-        return sorted([p for p in directory.iterdir() if p.suffix.lower() in exts])
-
-
-class FastStipplingDataset(Dataset):
-    """Fast approximation: sample from density map without Lloyd relaxation.
-    
-    This is faster but produces lower-quality stippling (more clumping).
-    Use for initial testing; switch to VoronoiStipplingDataset for training.
+    If target_dir is not provided, generates random uniform points.
     """
     
     def __init__(
@@ -176,62 +26,88 @@ class FastStipplingDataset(Dataset):
         source_dir: str,
         image_size: int = 512,
         num_points: int = 2048,
-        density_power: float = 2.0,
-        jitter: float = 0.5,
+        target_dir: Optional[str] = None,
     ):
+        """
+        Args:
+            source_dir: Directory with source images
+            image_size: Resize images to this size
+            num_points: Number of points to sample from target or generate
+            target_dir: Optional directory with target stippling masks
+        """
         self.source_dir = Path(source_dir)
+        self.target_dir = Path(target_dir) if target_dir else None
         self.image_size = image_size
         self.num_points = num_points
-        self.density_power = density_power
-        self.jitter = jitter
         
+        # Find all images
         self.image_paths = self._list_images(self.source_dir)
         if not self.image_paths:
             raise ValueError(f"No images found in {source_dir}")
         
-        print(f"FastStipplingDataset: {len(self.image_paths)} images")
+        # Check if target directory exists and has matching files
+        if self.target_dir:
+            if not self.target_dir.exists():
+                raise ValueError(f"Target directory not found: {target_dir}")
+            print(f"SimpleImageDataset: {len(self.image_paths)} paired images from {source_dir}")
+        else:
+            print(f"SimpleImageDataset: {len(self.image_paths)} images from {source_dir} (random points)")
     
     def __len__(self) -> int:
         return len(self.image_paths)
     
     def __getitem__(self, idx: int) -> dict:
-        img_path = self.image_paths[idx]
+        """Load source image and target stippling points."""
+        source_path = self.image_paths[idx]
         
-        # Load image
-        img = Image.open(img_path).convert('L').resize(
+        # Load source image (grayscale)
+        img = Image.open(source_path).convert('L').resize(
             (self.image_size, self.image_size), Image.BILINEAR
         )
         img_np = np.asarray(img, dtype=np.float32) / 255.0
         
-        # Density map
-        density = 1.0 - img_np
-        density = np.power(density, self.density_power)
-        density = density / (density.sum() + 1e-6)
-        
-        # Weighted random sampling
-        H, W = density.shape
-        flat_density = density.ravel()
-        indices = np.random.choice(H * W, size=self.num_points, replace=False, p=flat_density)
-        
-        ys, xs = np.unravel_index(indices, (H, W))
-        
-        # Add jitter for smoother distribution
-        xs = xs + np.random.uniform(-self.jitter, self.jitter, size=len(xs))
-        ys = ys + np.random.uniform(-self.jitter, self.jitter, size=len(ys))
-        
-        # Clamp and normalize
-        xs = np.clip(xs, 0, W - 1)
-        ys = np.clip(ys, 0, H - 1)
-        points = np.stack([xs, ys], axis=-1).astype(np.float32)
-        points_norm = (points / (self.image_size - 1)) * 2.0 - 1.0
+        # Load or generate points
+        if self.target_dir:
+            # Load target stippling mask
+            target_path = self.target_dir / source_path.name
+            if not target_path.exists():
+                raise FileNotFoundError(f"Target image not found: {target_path}")
+            
+            target = Image.open(target_path).convert('1').resize(
+                (self.image_size, self.image_size), Image.NEAREST
+            )
+            target_np = np.asarray(target, dtype=bool)
+            
+            # Extract stipple points (black pixels = False = stipple locations)
+            ys, xs = np.where(~target_np)  # Get coordinates of False (black) pixels
+            
+            if len(xs) == 0:
+                # No stipple points, generate random
+                points = np.random.uniform(-1.0, 1.0, size=(self.num_points, 2)).astype(np.float32)
+            elif len(xs) < self.num_points:
+                # Not enough points, sample with replacement
+                indices = np.random.choice(len(xs), size=self.num_points, replace=True)
+                points_pixel = np.stack([xs[indices], ys[indices]], axis=1).astype(np.float32)
+                # Normalize to [-1, 1]
+                points = (points_pixel / (self.image_size - 1)) * 2.0 - 1.0
+            else:
+                # Enough points, sample without replacement
+                indices = np.random.choice(len(xs), size=self.num_points, replace=False)
+                points_pixel = np.stack([xs[indices], ys[indices]], axis=1).astype(np.float32)
+                # Normalize to [-1, 1]
+                points = (points_pixel / (self.image_size - 1)) * 2.0 - 1.0
+        else:
+            # Generate random points uniformly in [-1, 1]
+            points = np.random.uniform(-1.0, 1.0, size=(self.num_points, 2)).astype(np.float32)
         
         return {
-            'image': torch.from_numpy(img_np).float().unsqueeze(0),
-            'points': torch.from_numpy(points_norm).float(),
+            'image': torch.from_numpy(img_np).float().unsqueeze(0),  # (1, H, W)
+            'points': torch.from_numpy(points).float(),  # (N, 2)
         }
     
     @staticmethod
     def _list_images(directory: Path):
+        """List all image files in directory."""
         exts = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'}
         return sorted([p for p in directory.iterdir() if p.suffix.lower() in exts])
 
@@ -241,19 +117,31 @@ def create_dataloaders(
     batch_size: int = 4,
     num_workers: int = 4,
     val_split: float = 0.1,
-    dataset_type: Literal['voronoi', 'fast'] = 'voronoi',
-    **dataset_kwargs,
+    image_size: int = 512,
+    num_points: int = 2048,
+    target_dir: Optional[str] = None,
 ) -> Tuple[DataLoader, DataLoader]:
-    """Create train and validation dataloaders."""
+    """Create train and validation dataloaders.
     
-    # Select dataset
-    if dataset_type == 'voronoi':
-        dataset_cls = VoronoiStipplingDataset
-    else:
-        dataset_cls = FastStipplingDataset
-    
-    # Create full dataset
-    full_dataset = dataset_cls(source_dir=source_dir, **dataset_kwargs)
+    Args:
+        source_dir: Directory with images
+        batch_size: Batch size
+        num_workers: Number of data loading workers
+        val_split: Fraction of data for validation
+        image_size: Image size (images will be resized to this)
+        num_points: Number of points in each point cloud
+        target_dir: Optional directory with target stippling masks
+        
+    Returns:
+        train_loader, val_loader
+    """
+    # Create dataset
+    full_dataset = SimpleImageDataset(
+        source_dir=source_dir,
+        image_size=image_size,
+        num_points=num_points,
+        target_dir=target_dir,
+    )
     
     # Split train/val
     dataset_size = len(full_dataset)
@@ -265,6 +153,8 @@ def create_dataloaders(
         [train_size, val_size],
         generator=torch.Generator().manual_seed(42),
     )
+    
+    print(f"Train samples: {train_size}, Val samples: {val_size}")
     
     train_loader = DataLoader(
         train_dataset,
@@ -287,9 +177,6 @@ def create_dataloaders(
 
 if __name__ == '__main__':
     # Test dataset
-    import matplotlib.pyplot as plt
-    
-    # Create dummy images for testing
     import tempfile
     import os
     
@@ -299,18 +186,12 @@ if __name__ == '__main__':
             img = np.random.rand(512, 512) * 255
             Image.fromarray(img.astype(np.uint8)).save(os.path.join(tmpdir, f'test_{i}.png'))
         
-        # Test fast dataset
-        print("Testing FastStipplingDataset...")
-        dataset = FastStipplingDataset(tmpdir, num_points=1000)
+        # Test dataset
+        print("Testing SimpleImageDataset...")
+        dataset = SimpleImageDataset(tmpdir, num_points=1000)
         sample = dataset[0]
         print(f"Image shape: {sample['image'].shape}")
         print(f"Points shape: {sample['points'].shape}")
+        print(f"Points range: [{sample['points'].min():.2f}, {sample['points'].max():.2f}]")
         
-        # Test Voronoi dataset (small for speed)
-        print("\nTesting VoronoiStipplingDataset...")
-        dataset = VoronoiStipplingDataset(tmpdir, num_points=500, lloyd_iterations=5)
-        sample = dataset[0]
-        print(f"Image shape: {sample['image'].shape}")
-        print(f"Points shape: {sample['points'].shape}")
-        
-        print("\n✓ Dataset tests passed")
+        print("\n✓ Dataset test passed")
