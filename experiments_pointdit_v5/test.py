@@ -7,6 +7,7 @@ from pathlib import Path
 from PIL import Image
 import matplotlib.pyplot as plt
 import os
+from typing import Union
 
 from config import Config
 from model import PointDiT
@@ -15,7 +16,7 @@ from diffusion import DDPMScheduler, sample
 
 def load_model(checkpoint_path: str, device: str = 'cuda'):
     """Load trained model from checkpoint."""
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint.get('config', Config.default())
     
     model = PointDiT(
@@ -36,22 +37,26 @@ def load_model(checkpoint_path: str, device: str = 'cuda'):
     return model, config
 
 
-def load_image(image_path: str, size: int = 512) -> torch.Tensor:
-    """Load and preprocess image."""
-    img = Image.open(image_path).convert('L').resize((size, size), Image.BILINEAR)
-    img_np = np.asarray(img, dtype=np.float32) / 255.0
+def load_image(image_path: str, size: int = 512) -> tuple[torch.Tensor, np.ndarray]:
+    """Load image for the model (grayscale) and keep the color original for display."""
+    original_color = Image.open(image_path).convert('RGB').resize((size, size), Image.BILINEAR)
+    img_gray = original_color.convert('L')
+    img_np = np.asarray(img_gray, dtype=np.float32) / 255.0
     img_tensor = torch.from_numpy(img_np).float().unsqueeze(0).unsqueeze(0)
-    return img_tensor
+    display_np = np.asarray(original_color)
+    return img_tensor, display_np
 
 
 def visualize_stippling(
     image: torch.Tensor,
     points: torch.Tensor,
+    original_image: Union[np.ndarray, None] = None,
     save_path: str = None,
     title: str = "Generated Stippling",
 ):
     """Visualize stippling result."""
     img = image[0, 0].cpu().numpy()
+    display_img = original_image if original_image is not None else img
     pts = points[0].cpu().numpy()
     
     H, W = img.shape
@@ -61,7 +66,10 @@ def visualize_stippling(
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     
     # Original image
-    axes[0].imshow(img, cmap='gray')
+    if display_img.ndim == 3:
+        axes[0].imshow(display_img)
+    else:
+        axes[0].imshow(display_img, cmap='gray')
     axes[0].set_title('Input Image')
     axes[0].axis('off')
     
@@ -75,7 +83,10 @@ def visualize_stippling(
     axes[1].axis('off')
     
     # Overlay
-    axes[2].imshow(img, cmap='gray', alpha=0.3)
+    if display_img.ndim == 3:
+        axes[2].imshow(display_img, alpha=0.35)
+    else:
+        axes[2].imshow(display_img, cmap='gray', alpha=0.35)
     axes[2].scatter(pts_pix[:, 0], pts_pix[:, 1], c='red', s=1, alpha=0.7)
     axes[2].set_title('Overlay')
     axes[2].axis('off')
@@ -123,7 +134,8 @@ def main():
     
     # Load image
     print(f"Loading image from {args.image}")
-    image = load_image(args.image, config.model.image_size).to(device)
+    image_tensor, display_image = load_image(args.image, config.model.image_size)
+    image = image_tensor.to(device)
     
     # Sample
     print(f"Generating stippling with {args.num_inference_steps} steps...")
@@ -140,7 +152,13 @@ def main():
     
     # Visualize
     output_path = args.output or f"stippling_output_{Path(args.image).stem}.png"
-    visualize_stippling(image, points, output_path, f"Point-DiT Stippling ({config.model.n_points} points)")
+    visualize_stippling(
+        image,
+        points,
+        display_image,
+        output_path,
+        f"Point-DiT Stippling ({config.model.n_points} points)",
+    )
     
     # Save points as NPY
     npy_path = output_path.replace('.png', '_points.npy')
