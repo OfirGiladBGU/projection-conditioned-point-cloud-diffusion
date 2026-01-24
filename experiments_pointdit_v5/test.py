@@ -138,13 +138,16 @@ def main():
     image = image_tensor.to(device)
     
     # Sample
-    print(f"Generating stippling with {args.num_inference_steps} steps...")
+    # Use current default model config points (now 5000) rather than checkpoint's saved value.
+    # This ensures predict supports updated output size independent of past configs.
+    num_pred_points = Config.default().model.n_points
+    print(f"Generating stippling with {args.num_inference_steps} steps (N={num_pred_points})...")
     with torch.no_grad():
         points = sample(
             model,
             scheduler,
             image,
-            config.model.n_points,
+            num_pred_points,
             args.num_inference_steps,
             device,
             show_progress=True,
@@ -157,7 +160,7 @@ def main():
         points,
         display_image,
         output_path,
-        f"Point-DiT Stippling ({config.model.n_points} points)",
+        f"Point-DiT Stippling ({num_pred_points} points)",
     )
     
     # Save points as NPY

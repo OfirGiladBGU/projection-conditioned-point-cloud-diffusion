@@ -8,7 +8,8 @@ from typing import Literal, Union
 class ModelConfig:
     """Point-DiT model configuration."""
 
-    n_points: int = 2048
+    # num_points: int = 4096
+    n_points: int = 5000
     dim: int = 128
     n_layers: int = 4
     n_heads: int = 4
@@ -45,8 +46,8 @@ class TrainingConfig:
     save_every: int = 1000
     sample_every: int = 500
 
-    use_wandb: bool = False
-    wandb_project: str = "point-dit-stippling"
+    use_wandb: bool = True
+    wandb_project: str = "PointDiT"
     wandb_run_name: Union[str, None] = None
 
     output_dir: str = "./outputs_pointdit_v5"
@@ -60,7 +61,8 @@ class DataConfig:
     source_dir: str = "/groups/asharf_group/ofirgila/ControlNet/training/fill50k-gs/source"
     target_dir: str = "/groups/asharf_group/ofirgila/ControlNet/training/fill50k-gs/target"
     image_size: int = 512
-    num_points: int = 2048
+    # num_points: int = 2048
+    num_points: int = 5000
     val_split: float = 0.1
 
 

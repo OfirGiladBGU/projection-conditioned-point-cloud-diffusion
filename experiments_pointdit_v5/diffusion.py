@@ -179,7 +179,7 @@ def train_step(
     image: torch.Tensor,
     device: str = "cuda",
     repulsion_weight: float = 0.5,
-) -> torch.Tensor:
+) -> dict:
     """Single training step predicting x_start with Chamfer + Repulsion loss.
     
     Args:
@@ -192,7 +192,7 @@ def train_step(
                          Higher = more even spacing, Lower = closer to GT shape
     
     Returns:
-        Combined loss (scalar)
+        Dict with 'loss' (combined), 'chamfer', and 'repulsion' components
     """
     batch_size = x_0.shape[0]
 
@@ -211,7 +211,11 @@ def train_step(
     # Combined loss
     loss = chamfer + (repulsion_weight * repulsion)
 
-    return loss
+    return {
+        'loss': loss,
+        'chamfer': chamfer.item(),
+        'repulsion': repulsion.item(),
+    }
 
 
 @torch.no_grad()

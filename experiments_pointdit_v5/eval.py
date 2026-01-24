@@ -179,14 +179,17 @@ def main():
         gt_points = extract_points_from_image(args.target, config.model.image_size)
         print(f"Extracted {len(gt_points)} ground truth points")
     
-    # Sample predictions
-    print(f"Generating stippling with {args.num_inference_steps} steps...")
+    # Decide how many points to generate: match GT count if available
+    num_pred_points = (
+        len(gt_points) if gt_points is not None and gt_points.size > 0 else config.model.n_points
+    )
+    print(f"Generating stippling with {args.num_inference_steps} steps (N={num_pred_points})...")
     with torch.no_grad():
         points = sample(
             model,
             scheduler,
             image,
-            config.model.n_points,
+            num_pred_points,
             args.num_inference_steps,
             device,
             show_progress=True,
@@ -203,7 +206,7 @@ def main():
             gt_points,
             pred_points,
             output_path,
-            f"Point-DiT Evaluation ({config.model.n_points} points)",
+            f"Point-DiT Evaluation ({num_pred_points} points)",
         )
     else:
         print("Could not load ground truth points for comparison")
