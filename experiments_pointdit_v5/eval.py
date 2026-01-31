@@ -136,9 +136,10 @@ def visualize_comparison(
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate Point-DiT model with GT comparison")
-    parser.add_argument('--checkpoint', type=str, required=True, help='Path to checkpoint')
-    parser.add_argument('--source', type=str, required=True, help='Path to input source image')
-    parser.add_argument('--target', type=str, required=True, help='Path to ground truth points (.npy)')
+    parser.add_argument('--example-name', type=str, default="gen_gray_Radial_Sinusoidal_Gradient_5536192_7079", help='Example name to evaluate')
+    parser.add_argument('--checkpoint', type=str, default=None, help='Path to checkpoint')
+    parser.add_argument('--source', type=str, default=None, help='Path to input source image')
+    parser.add_argument('--target', type=str, default=None, help='Path to ground truth points (.npy)')
     parser.add_argument('--output', type=str, default=None, help='Output path for visualization')
     parser.add_argument('--num-inference-steps', type=int, default=50, help='Number of sampling steps')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')

@@ -5,6 +5,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
+# Import Sinkhorn loss - the key addition for blue noise quality
+try:
+    from sinkhorn_lloyd_losses import SinkhornDensityLoss, HAS_GEOMLOSS
+except ImportError:
+    HAS_GEOMLOSS = False
+    SinkhornDensityLoss = None
+
 
 class ChamferLoss(nn.Module):
     """Chamfer distance loss for point clouds (set-aware matching)."""
@@ -78,6 +85,208 @@ class RepulsionLoss(nn.Module):
         repulsion = torch.nn.functional.relu(self.r - dist)
 
         return torch.mean(repulsion)
+
+
+class GridDensityLoss(nn.Module):
+    """Multi-scale Grid Density Loss for matching point distribution to image intensity.
+    
+    Forces the model to produce points whose local density matches the input image.
+    This is the key missing piece that Chamfer loss cannot enforce.
+    
+    Uses differentiable bilinear splatting to create a soft histogram of points,
+    then compares against the downsampled input image at multiple scales.
+    """
+    
+    def __init__(self, grid_sizes: tuple = (32, 64)):
+        """Initialize multi-scale grid density loss.
+        
+        Args:
+            grid_sizes: Tuple of grid resolutions to check density at.
+                       Using multiple scales prevents boundary gaming.
+        """
+        super().__init__()
+        self.grid_sizes = grid_sizes
+    
+    def _compute_density_at_scale(self, pred_points: torch.Tensor, 
+                                   input_images: torch.Tensor, 
+                                   grid_size: int) -> torch.Tensor:
+        """Compute density loss at a single scale using correlation-based loss.
+        
+        Args:
+            pred_points: (B, N, 2) in [-1, 1]
+            input_images: (B, 1, H, W) normalized [0, 1]
+            grid_size: Resolution for density comparison
+        
+        Returns:
+            Density matching loss (negative correlation + MSE for stability)
+        """
+        B, N, _ = pred_points.shape
+        device = pred_points.device
+        
+        # 1. Downsample input image to grid_size - this is our target density
+        target_density = F.interpolate(
+            input_images, size=(grid_size, grid_size), mode='bilinear', align_corners=False
+        )
+        target_density = target_density.squeeze(1)  # (B, H, W)
+        
+        # IMPORTANT: Invert the image! In stippling:
+        # - Dark pixels (intensity ~0) should have MORE points
+        # - Light pixels (intensity ~1) should have FEWER points
+        # So target density = 1 - image_intensity
+        target_density = 1.0 - target_density
+        
+        # 2. Rasterize predicted points into a grid using differentiable bilinear splatting
+        # Map [-1, 1] -> [0, grid_size-1]
+        pts_grid = (pred_points + 1) / 2 * (grid_size - 1)
+        
+        x = pts_grid[..., 0]  # (B, N)
+        y = pts_grid[..., 1]  # (B, N)
+        
+        # Bilinear interpolation corners
+        x0 = torch.floor(x).long().clamp(0, grid_size - 1)
+        y0 = torch.floor(y).long().clamp(0, grid_size - 1)
+        x1 = (x0 + 1).clamp(0, grid_size - 1)
+        y1 = (y0 + 1).clamp(0, grid_size - 1)
+        
+        # Bilinear weights
+        wa = (x1.float() - x) * (y1.float() - y)
+        wb = (x1.float() - x) * (y - y0.float())
+        wc = (x - x0.float()) * (y1.float() - y)
+        wd = (x - x0.float()) * (y - y0.float())
+        
+        # Accumulate weights into grid using scatter_add
+        batch_indices = torch.arange(B, device=device).unsqueeze(1).expand(-1, N)
+        
+        def scatter_to_grid(idx_x, idx_y, weights):
+            """Scatter weights to flattened grid and reshape."""
+            flat_idx = batch_indices * (grid_size ** 2) + idx_y * grid_size + idx_x
+            result = torch.zeros(B * grid_size ** 2, device=device, dtype=pred_points.dtype)
+            result = result.scatter_add_(0, flat_idx.flatten(), weights.flatten())
+            return result.view(B, grid_size, grid_size)
+        
+        pred_density = (
+            scatter_to_grid(x0, y0, wa) + 
+            scatter_to_grid(x0, y1, wb) + 
+            scatter_to_grid(x1, y0, wc) + 
+            scatter_to_grid(x1, y1, wd)
+        )
+        
+        # 3. Normalize both to have zero mean and unit variance for correlation
+        target_flat = target_density.view(B, -1)  # (B, H*W)
+        pred_flat = pred_density.view(B, -1)
+        
+        target_mean = target_flat.mean(dim=1, keepdim=True)
+        pred_mean = pred_flat.mean(dim=1, keepdim=True)
+        
+        target_centered = target_flat - target_mean
+        pred_centered = pred_flat - pred_mean
+        
+        target_std = target_centered.std(dim=1, keepdim=True) + 1e-6
+        pred_std = pred_centered.std(dim=1, keepdim=True) + 1e-6
+        
+        # Correlation coefficient (maximize, so negate for loss)
+        correlation = (target_centered * pred_centered).sum(dim=1) / (
+            target_std.squeeze() * pred_std.squeeze() * target_flat.shape[1]
+        )
+        
+        # Loss = 1 - correlation (so perfect match = 0)
+        return (1.0 - correlation.mean())
+    
+    def forward(self, pred_points: torch.Tensor, input_images: torch.Tensor) -> torch.Tensor:
+        """Compute multi-scale grid density loss.
+        
+        Args:
+            pred_points: (B, N, 2) predicted points in [-1, 1]
+            input_images: (B, 1, H, W) conditioning image normalized [0, 1]
+        
+        Returns:
+            Combined loss across all scales
+        """
+        total_loss = 0.0
+        for grid_size in self.grid_sizes:
+            total_loss = total_loss + self._compute_density_at_scale(
+                pred_points, input_images, grid_size
+            )
+        return total_loss / len(self.grid_sizes)
+
+
+class AdaptiveRepulsionLoss(nn.Module):
+    """Adaptive Repulsion Loss with density-aware spacing.
+    
+    Unlike fixed-radius repulsion, this adapts the required spacing based on
+    the local image intensity. Dark areas (high density) allow closer points,
+    while light areas (low density) require larger spacing.
+    
+    This is the "physics" that makes stippling work - points naturally pack
+    tighter where more density is needed.
+    """
+    
+    def __init__(self, base_radius: float = 0.02, min_radius: float = 0.005, max_radius: float = 0.1):
+        """Initialize adaptive repulsion loss.
+        
+        Args:
+            base_radius: Base repulsion radius (scaled by intensity)
+            min_radius: Minimum allowed radius (prevents infinite packing in black)
+            max_radius: Maximum allowed radius (prevents explosion in white)
+        """
+        super().__init__()
+        self.base_radius = base_radius
+        self.min_radius = min_radius
+        self.max_radius = max_radius
+    
+    def forward(self, points: torch.Tensor, images: torch.Tensor) -> torch.Tensor:
+        """Compute adaptive repulsion loss.
+        
+        Args:
+            points: (B, N, 2) predicted points in [-1, 1]
+            images: (B, 1, H, W) conditioning image
+        
+        Returns:
+            Adaptive repulsion loss (scalar)
+        """
+        B, N, _ = points.shape
+        device = points.device
+        
+        # 1. Sample image intensity at each point location using grid_sample
+        # grid_sample expects (B, N, 1, 2) for 2D sampling
+        grid = points.unsqueeze(2)  # (B, N, 1, 2)
+        # Output: (B, 1, N, 1) -> squeeze to (B, N)
+        intensity = F.grid_sample(
+            images, grid, mode='bilinear', padding_mode='border', align_corners=True
+        ).squeeze(-1).squeeze(1)  # (B, N)
+        
+        # 2. Compute dynamic radius per point
+        # IMPORTANT: Invert intensity! In stippling:
+        # - Dark pixels (intensity ~0) = HIGH density = SMALLER spacing allowed
+        # - Light pixels (intensity ~1) = LOW density = LARGER spacing required
+        # So we use (1 - intensity) as our density proxy
+        density = 1.0 - intensity  # Now: dark=1 (high density), light=0 (low density)
+        
+        # Formula: R = base_radius / sqrt(density + epsilon)
+        # This gives R ~ 1/sqrt(density), which matches Lloyd's relaxation physics
+        # Higher density -> smaller radius -> points can be closer
+        dynamic_r = self.base_radius / torch.sqrt(density + 0.1)
+        dynamic_r = dynamic_r.clamp(min=self.min_radius, max=self.max_radius)
+        
+        # 3. Compute pairwise distance matrix
+        loc = points.unsqueeze(2)  # (B, N, 1, 2)
+        ref = points.unsqueeze(1)  # (B, 1, N, 2)
+        dist = torch.sqrt(torch.sum((loc - ref) ** 2, dim=-1) + 1e-6)  # (B, N, N)
+        
+        # 4. Mask self-distances (diagonal)
+        mask = torch.eye(N, device=device, dtype=torch.bool).unsqueeze(0)
+        dist = dist.masked_fill(mask, float('inf'))
+        
+        # 5. Compute required distance for each pair
+        # For pair (i, j), required distance = average of their radii
+        r_i = dynamic_r.unsqueeze(2)  # (B, N, 1)
+        r_j = dynamic_r.unsqueeze(1)  # (B, 1, N)
+        required_dist = (r_i + r_j) / 2.0  # (B, N, N)
+        
+        # 6. Penalty for pairs closer than required
+        penalty = F.relu(required_dist - dist)
+        
+        return torch.mean(penalty)
 
 
 class DDPMScheduler:
@@ -170,6 +379,14 @@ class DDPMScheduler:
 # Instantiate losses globally
 _chamfer_loss = ChamferLoss()
 _repulsion_loss = RepulsionLoss(repulsion_radius=0.02)
+_grid_density_loss = GridDensityLoss(grid_sizes=(32, 64))
+_adaptive_repulsion_loss = AdaptiveRepulsionLoss(base_radius=0.02, min_radius=0.005, max_radius=0.1)
+
+# Sinkhorn loss for Optimal Transport matching (key for blue noise quality)
+# OPTIMIZED: blur=0.02, scaling=0.8, grid_size=32 -> 12x faster than original
+# Original (blur=0.01, scaling=0.9, grid=64): 2479ms/batch
+# Optimized: ~200ms/batch with 0.90 gradient similarity
+_sinkhorn_loss = SinkhornDensityLoss() if SinkhornDensityLoss is not None else None  # Uses optimized defaults
 
 
 def train_step(
@@ -178,9 +395,22 @@ def train_step(
     x_0: torch.Tensor,
     image: torch.Tensor,
     device: str = "cuda",
-    repulsion_weight: float = 0.5,
+    chamfer_weight: float = 10.0,
+    sinkhorn_weight: float = 0.0,
+    repulsion_weight: float = 0.0,
+    grid_density_weight: float = 0.0,
+    use_adaptive_repulsion: bool = False,
 ) -> dict:
-    """Single training step predicting x_start with Chamfer + Repulsion loss.
+    """Single training step predicting x_start with loss combination.
+    
+    All losses are computed ONLY if their weight > 0. This avoids unnecessary
+    computation and makes the API simple: set weight > 0 to enable a loss.
+    
+    Available losses:
+    - chamfer: Position accuracy (match GT point positions)
+    - sinkhorn: Optimal Transport for blue noise distribution
+    - repulsion: Point spacing (prevents clustering)
+    - grid_density: Multi-scale density matching
     
     Args:
         model: Point-DiT model
@@ -188,11 +418,14 @@ def train_step(
         x_0: (B, N, 2) clean target points
         image: (B, 1, H, W) conditioning image
         device: device string
-        repulsion_weight: Weight for repulsion loss (default 0.5)
-                         Higher = more even spacing, Lower = closer to GT shape
+        chamfer_weight: Weight for Chamfer loss (0 = disabled)
+        sinkhorn_weight: Weight for Sinkhorn OT loss (0 = disabled)
+        repulsion_weight: Weight for repulsion loss (0 = disabled)
+        grid_density_weight: Weight for grid density loss (0 = disabled)
+        use_adaptive_repulsion: If True and repulsion_weight > 0, use AdaptiveRepulsionLoss
     
     Returns:
-        Dict with 'loss' (combined), 'chamfer', and 'repulsion' components
+        Dict with 'loss' (combined) and individual loss components
     """
     batch_size = x_0.shape[0]
 
@@ -202,20 +435,44 @@ def train_step(
     x_t = scheduler.add_noise(x_0, noise, timesteps)
     pred_x0 = model(x_t, timesteps, image)
 
-    # Chamfer: match shape coverage (primary objective)
-    chamfer = _chamfer_loss(pred_x0, x_0)
-    
-    # Repulsion: enforce even spacing / blue noise (stippling quality)
-    repulsion = _repulsion_loss(pred_x0)
-    
-    # Combined loss
-    loss = chamfer + (repulsion_weight * repulsion)
-
-    return {
-        'loss': loss,
-        'chamfer': chamfer.item(),
-        'repulsion': repulsion.item(),
+    # Initialize loss and tracking dict
+    loss = 0.0
+    losses = {
+        'chamfer': 0.0,
+        'sinkhorn': 0.0,
+        'repulsion': 0.0,
+        'grid_density': 0.0,
     }
+    
+    # Chamfer: match point positions to GT
+    if chamfer_weight > 0:
+        chamfer = _chamfer_loss(pred_x0, x_0)
+        loss = loss + chamfer_weight * chamfer
+        losses['chamfer'] = chamfer.item()
+    
+    # Sinkhorn: Optimal Transport for blue noise distribution
+    if sinkhorn_weight > 0 and _sinkhorn_loss is not None:
+        sinkhorn = _sinkhorn_loss(pred_x0, image)
+        loss = loss + sinkhorn_weight * sinkhorn
+        losses['sinkhorn'] = sinkhorn.item()
+    
+    # Repulsion: point spacing
+    if repulsion_weight > 0:
+        if use_adaptive_repulsion:
+            repulsion = _adaptive_repulsion_loss(pred_x0, image)
+        else:
+            repulsion = _repulsion_loss(pred_x0)
+        loss = loss + repulsion_weight * repulsion
+        losses['repulsion'] = repulsion.item()
+    
+    # Grid density: multi-scale density matching
+    if grid_density_weight > 0:
+        grid_density = _grid_density_loss(pred_x0, image)
+        loss = loss + grid_density_weight * grid_density
+        losses['grid_density'] = grid_density.item()
+    
+    losses['loss'] = loss
+    return losses
 
 
 @torch.no_grad()

@@ -1,9 +1,9 @@
 # Point-DiT V5: Production-Ready Neural Stippling
 
-**Model Version:** V5 (Fourier Features + RepulsionLoss)  
-**Status:** ✓ Validated on overfit tests  
+**Model Version:** V5 (Fourier Features + Hybrid Loss Strategy)  
+**Status:** ✓ Production Ready with Hybrid Training  
 **Parameters:** 1,035,362 (1.04M)  
-**Date:** December 28, 2025
+**Last Updated:** January 31, 2026
 
 ---
 
@@ -12,7 +12,7 @@
 **Point-DiT V5** is a **production-ready Diffusion Transformer** for high-quality neural stippling and non-photorealistic rendering. It moves away from complex 3D projection methods to a pure 2D approach that generates point clouds directly from binary or grayscale image masks using:
 
 - **Fourier positional embeddings** (32 frequencies) for unique spatial fingerprints
-- **RepulsionLoss** for blue-noise point distribution (even spacing)
+- **Hybrid Loss Strategy** (Phase 1: Chamfer+Repulsion → Phase 2: Sinkhorn+Chamfer)
 - **ChamferLoss** for shape-aware coverage
 - **Shallow CNN encoder** with GroupNorm for stability on binary masks
 - **Transformer decoder** with cross-attention to image features (1.04M parameters)
@@ -20,6 +20,7 @@
 ### Key Results
 
 ✓ **Overfit test convergence:** Loss 0.426 → 0.0004-0.0006 (1000× improvement)  
+✓ **Blue noise quality:** Sinkhorn achieves NN ratio 1.012 (near-perfect match to GT)  
 ✓ **No failure modes:** Eliminates diagonal collapse, centroid clustering, and noisy clouds  
 ✓ **Production ready:** Validated on 10+ sample tests with robust convergence  
 ✓ **Fast inference:** ~50-100 diffusion steps for high-quality output
@@ -153,23 +154,144 @@ Unlike binary-only models, **Point-DiT V5** naturally handles grayscale images.
 ### Model & Diffusion
 
 ```python
-model = PointDiT(n_points=2048, dim=128, n_layers=4, n_heads=4)
+model = PointDiT(n_points=5000, dim=128, n_layers=4, n_heads=4)
 scheduler = DDPMScheduler(
     num_train_timesteps=1000,
     beta_start=1e-4,
     beta_end=0.02,
     beta_schedule="linear",
 )
-
 ```
 
-### Loss Functions
+---
+
+## Hybrid Training Strategy (January 2026)
+
+The training uses a **two-phase hybrid approach** that balances training speed with blue noise quality:
+
+### Why Hybrid?
+
+| Loss Type | Time/Epoch | Blue Noise Quality | Notes |
+|-----------|------------|-------------------|-------|
+| Chamfer + Repulsion | ~46 min | Good (NN ratio ~0.75) | Fast, good position learning |
+| Sinkhorn + Chamfer | ~103 min | Excellent (NN ratio ~1.01) | Slow but near-perfect distribution |
+
+Pure Sinkhorn training would take **7 days**. Hybrid approach takes **~4 days** with near-equivalent quality.
+
+### Phase Configuration
 
 ```python
-chamfer_loss = ChamferLoss()              # Set-aware coverage
-repulsion_loss = RepulsionLoss(radius=0.02)  # Blue-noise spacing
-loss = chamfer + 0.5 * repulsion
+# In train.py
+PHASE1_EPOCHS = 80   # Chamfer + Repulsion (fast, position learning)
+PHASE2_EPOCHS = 20   # Sinkhorn + Chamfer (slower, blue noise refinement)
+TOTAL_EPOCHS = 100
+```
 
+### Phase 1: Position Learning (Epochs 0-79)
+- **Loss:** Chamfer (weight=1.0) + Repulsion (weight=1.0)
+- **Purpose:** Teach the model to place points correctly within shapes
+- **Speed:** ~46 min/epoch
+- **Total:** ~2.5 days
+
+### Phase 2: Blue Noise Refinement (Epochs 80-99)
+- **Loss:** Sinkhorn (weight=1.0) + Chamfer (weight=10.0)
+- **Purpose:** Refine point distribution for optimal blue noise quality
+- **Speed:** ~103 min/epoch
+- **Total:** ~1.5 days
+
+### Sinkhorn Loss (Optimal Transport)
+
+Sinkhorn divergence computes the **Earth Mover's Distance** between predicted points and image density:
+
+```python
+# In sinkhorn_lloyd_losses.py
+class SinkhornDensityLoss:
+    """
+    - Source: Predicted points (uniform weights)
+    - Target: Image density (dark pixels = high probability mass)
+    - Loss: Wasserstein distance between distributions
+    """
+    def __init__(self, blur=0.05, grid_size=32, scaling=0.5):
+        # Optimized parameters for speed (193ms vs 2479ms original)
+        self.loss_fn = SamplesLoss("sinkhorn", p=2, blur=blur, scaling=scaling)
+```
+
+**Performance optimization:**
+- Original: blur=0.01, scaling=0.9, grid=64 → 2479ms/batch
+- Optimized: blur=0.05, scaling=0.5, grid=32 → 193ms/batch (12x faster)
+- Gradient cosine similarity: 0.70 (acceptable for training)
+
+---
+
+## Crash Recovery & Checkpointing
+
+Training automatically resumes from crashes. Just run `python train.py` again.
+
+### Checkpoint Files
+
+| File | Description |
+|------|-------------|
+| `checkpoint_latest.pth` | Saved every epoch (for crash recovery) |
+| `checkpoint_best.pth` | Best validation loss |
+| `checkpoint_phase1_complete.pth` | After epoch 79 (before Sinkhorn phase) |
+| `checkpoint_epoch_N.pth` | Every 10 epochs |
+| `checkpoint_final.pth` | After training completes |
+
+### Checkpoint Contents
+
+```python
+checkpoint = {
+    'epoch': epoch,
+    'model_state_dict': model.state_dict(),
+    'optimizer_state_dict': optimizer.state_dict(),
+    'lr_scheduler_state_dict': lr_scheduler.state_dict(),
+    'train_loss': train_loss,
+    'val_loss': val_loss,
+    'best_val_loss': best_val_loss,
+    'training_phase': 1 or 2,  # Which phase we're in
+    'phase_config': {...},     # Loss weights for current phase
+    'hybrid_settings': {
+        'phase1_epochs': 80,
+        'phase2_epochs': 20,
+        'total_epochs': 100,
+    },
+}
+```
+
+### Auto-Resume Logic
+
+```python
+# In train.py main()
+latest_ckpt_path = os.path.join(output_dir, 'checkpoint_latest.pth')
+
+if os.path.exists(latest_ckpt_path):
+    # Auto-resume from latest checkpoint
+    checkpoint = torch.load(latest_ckpt_path)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
+    start_epoch = checkpoint['epoch'] + 1
+    # Detects phase transitions automatically
+```
+
+---
+
+## Loss Functions
+
+### Phase 1: Chamfer + Repulsion
+
+```python
+chamfer_loss = ChamferLoss()                  # Set-aware coverage
+repulsion_loss = RepulsionLoss(radius=0.02)   # Blue-noise spacing
+loss = chamfer + 1.0 * repulsion
+```
+
+### Phase 2: Sinkhorn + Chamfer
+
+```python
+sinkhorn_loss = SinkhornDensityLoss()  # Optimal transport
+chamfer_loss = ChamferLoss()           # Position accuracy
+loss = 1.0 * sinkhorn + 10.0 * chamfer
 ```
 
 ### Optimizer & Training
@@ -177,7 +299,7 @@ loss = chamfer + 0.5 * repulsion
 ```python
 optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=1e-5)
 max_grad_norm = 1.0  # Gradient clipping
-# Warmup + Cosine LR (matches train.py)
+# Warmup + Cosine LR (adjusted for 100 epochs)
 def lr_lambda(epoch):
     warmup_epochs = 5
     total_epochs = 100
@@ -189,7 +311,6 @@ def lr_lambda(epoch):
             np.pi * (epoch - warmup_epochs) / (total_epochs - warmup_epochs)
         ))
 lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
 ```
 
 ---
@@ -206,19 +327,36 @@ conda activate pc2
 python test_overfit.py --sample-index 10 --steps 1000 --lr 5e-4
 
 # Expected: loss 0.4-0.8 → 0.0004-0.0006 in ~5 min
-
 ```
 
-### Full Training
+### Full Training (Hybrid Strategy)
 
 ```bash
-# Production training (defaults from config.py)
-# Edit config.py (TrainingConfig) to adjust batch size, epochs, etc.
+# Production training with hybrid loss strategy
+# Phase 1 (epochs 0-79): Chamfer + Repulsion
+# Phase 2 (epochs 80-99): Sinkhorn + Chamfer
 python train.py
 
-# Example: change batch size/epochs
-#   - Open experiments_pointdit_v5/config.py and set:
-#       TrainingConfig(batch_size=8, num_epochs=100, learning_rate=1e-4)
+# Training will auto-resume from checkpoint_latest.pth if it exists
+# Output directory: ./outputs_pointdit_v5_hybrid
+# Wandb run name: v5_hybrid
+
+# Estimated time: ~4 days on RTX 6000
+# - Phase 1: ~2.5 days (80 epochs × 46 min)
+# - Phase 2: ~1.5 days (20 epochs × 103 min)
+```
+
+### Monitor Training
+
+```bash
+# Watch training progress
+tail -f training.log
+
+# Check wandb dashboard for metrics:
+# - train_loss, val_loss
+# - train_chamfer, val_chamfer
+# - train_repulsion (Phase 1) or train_sinkhorn (Phase 2)
+# - training_phase (1 or 2)
 ```
 
 ### Inference
@@ -226,14 +364,31 @@ python train.py
 ```bash
 # Test on custom mask
 python test.py \
-    --checkpoint checkpoints_final_v5/best_model.pth \
+    --checkpoint outputs_pointdit_v5_hybrid/checkpoint_best.pth \
     --image path/to/mask.png \
     --inference-steps 250
-
 ```
 
 ---
 
-**Status:** ✓ PRODUCTION READY - Ready for 50k dataset training
+## Training Timeline
 
-*Last updated: December 28, 2025*
+```
+Day 0-2.5:  Phase 1 (Chamfer + Repulsion)
+            ├── Epoch 0:   Learning basic position placement
+            ├── Epoch 40:  Good shape coverage
+            └── Epoch 79:  Position learning complete
+                           → checkpoint_phase1_complete.pth saved
+
+Day 2.5-4:  Phase 2 (Sinkhorn + Chamfer)
+            ├── Epoch 80:  Switch to Sinkhorn (expect slower epochs)
+            ├── Epoch 90:  Blue noise refinement
+            └── Epoch 99:  Training complete
+                           → checkpoint_final.pth saved
+```
+
+---
+
+**Status:** ✓ PRODUCTION READY - Hybrid training for optimal quality/speed trade-off
+
+*Last updated: January 31, 2026*

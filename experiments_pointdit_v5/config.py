@@ -48,9 +48,9 @@ class TrainingConfig:
 
     use_wandb: bool = True
     wandb_project: str = "PointDiT"
-    wandb_run_name: Union[str, None] = None
+    wandb_run_name: Union[str, None] = "v5_hybrid"
 
-    output_dir: str = "./outputs_pointdit_v5"
+    output_dir: str = "./outputs_pointdit_v5_hybrid"
     checkpoint_path: Union[str, None] = None
 
 
@@ -58,8 +58,10 @@ class TrainingConfig:
 class DataConfig:
     """Dataset configuration."""
 
-    source_dir: str = "/groups/asharf_group/ofirgila/ControlNet/training/fill50k-gs/source"
-    target_dir: str = "/groups/asharf_group/ofirgila/ControlNet/training/fill50k-gs/target"
+    # source_dir: str = "/groups/asharf_group/ofirgila/ControlNet/training/fill50k-gs/source"
+    # target_dir: str = "/groups/asharf_group/ofirgila/ControlNet/training/fill50k-gs/target"
+    source_dir: str = "/groups/asharf_group/ofirgila/ControlNet/training/data_grads_v3/source"
+    target_dir: str = "/groups/asharf_group/ofirgila/ControlNet/training/data_grads_v3/target"
     image_size: int = 512
     # num_points: int = 2048
     num_points: int = 5000
