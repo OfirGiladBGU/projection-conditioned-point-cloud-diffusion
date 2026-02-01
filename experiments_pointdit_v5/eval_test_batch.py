@@ -27,7 +27,9 @@ from diffusion import DDPMScheduler, sample, ChamferLoss
 try:
     from metrics_v2 import (
         radial_profile_2d,
+        radial_profile_difference_2d,
         anisotropy_metric_2d,
+        anisotropy_score,
         log_power_spectrum_2d,
     )
     HAS_SPECTRAL_METRICS = True
@@ -112,6 +114,14 @@ def main():
     source_files = sorted(test_source_dir.glob("*.png"))
     print(f"\nLoaded {len(source_files)} test samples")
 
+    def extract_mode_from_filename(path: Path) -> str:
+        # Expected format: gen_gray_<MODE>_<SEED>_<IDX>.png
+        parts = path.stem.split("_")
+        if len(parts) < 5:
+            return "Unknown"
+        mode_parts = parts[2:-2]
+        return "_".join(mode_parts) if mode_parts else "Unknown"
+
     # Output directory
     out_dir = Path(__file__).parent / "evaluation_results"
     out_dir.mkdir(exist_ok=True)
@@ -122,11 +132,48 @@ def main():
         "spectral_metrics": [],
         "radial_profiles_gt": [],
         "radial_profiles_pred": [],
+        "radial_profile_diffs": [],
     }
 
-    num_samples = min(2000, len(source_files))
-    print(f"\nEvaluating on {num_samples} test samples...")
-    for idx, source_file in enumerate(tqdm(source_files[:num_samples])):
+    # Build mode-stratified sampling: proportional to class distribution
+    mode_to_files = {}
+    for path in source_files:
+        mode = extract_mode_from_filename(path)
+        if mode not in mode_to_files:
+            mode_to_files[mode] = []
+        mode_to_files[mode].append(path)
+    
+    unique_modes = sorted(mode_to_files.keys())
+    print(f"Unique modes found: {len(unique_modes)}")
+    for mode in unique_modes:
+        print(f"  {mode}: {len(mode_to_files[mode])} samples")
+    
+    # Target 2000 samples, stratified by mode
+    target_samples = min(2000, len(source_files))
+    total_available = len(source_files)
+    eval_files = []
+    visualization_files = set()
+    
+    # Select proportional samples from each mode + ensure at least 1 for visualization
+    for mode in unique_modes:
+        mode_files = mode_to_files[mode]
+        mode_proportion = len(mode_files) / total_available
+        mode_target = max(1, int(target_samples * mode_proportion))
+        
+        # Select samples for evaluation (proportional)
+        sampled = mode_files[:mode_target]
+        eval_files.extend(sampled)
+        
+        # Ensure at least 1 for visualization
+        visualization_files.add(sampled[0])
+    
+    print(f"Stratified sampling: {len(eval_files)} samples ({len(unique_modes)} modes)")
+    for mode in unique_modes:
+        mode_eval_count = sum(1 for f in eval_files if extract_mode_from_filename(f) == mode)
+        print(f"  {mode}: {mode_eval_count} samples")
+
+    print(f"\nEvaluating on {len(eval_files)} test samples...")
+    for idx, source_file in enumerate(tqdm(eval_files)):
         # Load image
         img = Image.open(source_file).convert("L")
         img_np = np.array(img) / 255.0
@@ -170,7 +217,9 @@ def main():
             print(f"  Image size: {image_size}")
         
         pred_points_pixel = (pred_points_np + 1.0) * (image_size / 2.0)
-        pred_img = convert_points_to_image(pred_points_pixel, image_size)
+        pred_img_white = np.ones((image_size, image_size), dtype=np.uint8) * 255
+        pred_points_pixel_int = np.clip(pred_points_pixel, 0, image_size - 1).astype(np.int32)
+        pred_img_white[pred_points_pixel_int[:, 1], pred_points_pixel_int[:, 0]] = 0
 
         # Compute NN metrics
         nn_metrics = compute_blue_noise_metrics(pred_points, gt_points_tensor)
@@ -179,41 +228,48 @@ def main():
         # Compute spectral metrics
         if HAS_SPECTRAL_METRICS:
             try:
-                radial_prof_pred = radial_profile_2d(pred_img, plot=False)
+                radial_prof_pred = radial_profile_2d(pred_img_white, plot=False)
                 radial_prof_gt = radial_profile_2d(target_np, plot=False)
+
+                radial_diff = radial_profile_difference_2d(target_np, pred_img_white, plot=False)
+                spec_gt = log_power_spectrum_2d(target_np, plot=False)
+                spec_pred = log_power_spectrum_2d(pred_img_white, plot=False)
+                ang_gt = anisotropy_metric_2d(spec_gt, plot=False)
+                ang_pred = anisotropy_metric_2d(spec_pred, plot=False)
+                anisotropy_gt = anisotropy_score(ang_gt)
+                anisotropy_pred = anisotropy_score(ang_pred)
 
                 all_metrics["radial_profiles_gt"].append(radial_prof_gt)
                 all_metrics["radial_profiles_pred"].append(radial_prof_pred)
+                all_metrics["radial_profile_diffs"].append(radial_diff)
 
                 spec_metrics = {
                     "radial_profile_diff": float(np.mean(np.abs(radial_prof_pred - radial_prof_gt))),
+                    "anisotropy_gt": anisotropy_gt,
+                    "anisotropy_pred": anisotropy_pred,
+                    "anisotropy_diff": float(abs(anisotropy_gt - anisotropy_pred)),
                 }
                 all_metrics["spectral_metrics"].append(spec_metrics)
             except Exception as e:
                 print(f"Error computing spectral metrics for sample {idx}: {e}")
 
-        # Save detailed visualization for first 5 samples
-        if idx < 5:
-            # Create white background image for predicted points (black on white)
-            pred_img_white = np.ones((image_size, image_size), dtype=np.uint8) * 255
-            pred_points_pixel_int = np.clip(pred_points_pixel, 0, image_size - 1).astype(np.int32)
-            pred_img_white[pred_points_pixel_int[:, 1], pred_points_pixel_int[:, 0]] = 0
-
-            # Create layout: 3 columns x 2 rows
-            fig = plt.figure(figsize=(16, 10))
+        # Save detailed visualization for one sample per mode
+        if source_file in visualization_files:
+            # Create layout: 3 columns x 3 rows (extra comparisons under GT/OUTPUT)
+            fig = plt.figure(figsize=(16, 12))
 
             # Row 1: INPUT | GT POINTS | OUTPUT POINTS
-            ax1 = plt.subplot(2, 3, 1)
+            ax1 = plt.subplot(3, 3, 1)
             ax1.imshow(img_np, cmap="gray")
             ax1.set_title("Input Image", fontsize=12, fontweight="bold")
             ax1.axis("off")
 
-            ax2 = plt.subplot(2, 3, 2)
+            ax2 = plt.subplot(3, 3, 2)
             ax2.imshow(target_np, cmap="gray", vmin=0, vmax=255)
             ax2.set_title("GT Points", fontsize=12, fontweight="bold")
             ax2.axis("off")
 
-            ax3 = plt.subplot(2, 3, 3)
+            ax3 = plt.subplot(3, 3, 3)
             ax3.imshow(pred_img_white, cmap="gray", vmin=0, vmax=255)
             ax3.set_title(
                 f"Output Points\nChamfer={nn_metrics['chamfer']:.4f}, CV={nn_metrics['cv']:.3f}",
@@ -224,32 +280,65 @@ def main():
 
             # Row 2: Spectral comparisons
             if HAS_SPECTRAL_METRICS:
-                # Spectral difference
-                ax4 = plt.subplot(2, 3, 4)
-                power_gt = np.abs(np.fft.fftshift(np.fft.fft2(target_np.astype(float) - target_np.mean()))) ** 2
-                power_pred = np.abs(np.fft.fftshift(np.fft.fft2(pred_img_white.astype(float) - pred_img_white.mean()))) ** 2
-                power_diff = np.abs(power_gt - power_pred)
-                power_diff_log = np.log(power_diff + 1.0)
-                ax4.imshow(power_diff_log, cmap="hot")
-                ax4.set_title("Spectral Difference", fontsize=11, fontweight="bold")
-                ax4.axis("off")
+                # Spectral difference (radial profile diff)
+                ax4 = plt.subplot(3, 3, 4)
+                radial_prof_gt = radial_profile_2d(target_np, plot=False)
+                radial_prof_pred = radial_profile_2d(pred_img_white, plot=False)
+                radial_diff = radial_profile_difference_2d(target_np, pred_img_white, plot=False)
+                ax4.plot(radial_diff, linewidth=2)
+                ax4.set_title("Spectral Diff (Radial)", fontsize=11, fontweight="bold")
+                ax4.set_xlabel("Radius", fontsize=9)
+                ax4.set_ylabel("|Δ Power|", fontsize=9)
+                ax4.grid(True, alpha=0.3)
 
                 # GT radial profile
-                ax5 = plt.subplot(2, 3, 5)
-                power_gt_log = np.log(power_gt + 1.0)
-                ax5.imshow(power_gt_log, cmap="viridis")
-                ax5.set_title("GT Power Spectrum", fontsize=11, fontweight="bold")
-                ax5.axis("off")
+                ax5 = plt.subplot(3, 3, 5)
+                ax5.plot(radial_prof_gt, linewidth=2)
+                ax5.set_title("GT Radial Profile", fontsize=11, fontweight="bold")
+                ax5.set_xlabel("Radius", fontsize=9)
+                ax5.set_ylabel("Power", fontsize=9)
+                ax5.grid(True, alpha=0.3)
 
                 # Output radial profile
-                ax6 = plt.subplot(2, 3, 6)
-                power_pred_log = np.log(power_pred + 1.0)
-                ax6.imshow(power_pred_log, cmap="viridis")
-                ax6.set_title("Output Power Spectrum", fontsize=11, fontweight="bold")
-                ax6.axis("off")
+                ax6 = plt.subplot(3, 3, 6)
+                ax6.plot(radial_prof_pred, linewidth=2)
+                ax6.set_title("Output Radial Profile", fontsize=11, fontweight="bold")
+                ax6.set_xlabel("Radius", fontsize=9)
+                ax6.set_ylabel("Power", fontsize=9)
+                ax6.grid(True, alpha=0.3)
+
+                # Row 3: Additional comparisons under GT/OUTPUT columns
+                ax7 = plt.subplot(3, 3, 7)
+                ax7.axis("off")
+                spec_gt = log_power_spectrum_2d(target_np, plot=False)
+                spec_pred = log_power_spectrum_2d(pred_img_white, plot=False)
+                ang_gt = anisotropy_metric_2d(spec_gt, plot=False)
+                ang_pred = anisotropy_metric_2d(spec_pred, plot=False)
+                anisotropy_gt = anisotropy_score(ang_gt)
+                anisotropy_pred = anisotropy_score(ang_pred)
+                anisotropy_diff = float(abs(anisotropy_gt - anisotropy_pred))
+                ax7.text(
+                    0.0,
+                    0.8,
+                    f"Anisotropy GT: {anisotropy_gt:.4f}\n"
+                    f"Anisotropy Output: {anisotropy_pred:.4f}\n"
+                    f"Aniso Diff: {anisotropy_diff:.4f}",
+                    fontsize=10,
+                )
+
+                ax8 = plt.subplot(3, 3, 8)
+                ax8.imshow(spec_gt, cmap="viridis")
+                ax8.set_title("GT Power Spectrum", fontsize=10, fontweight="bold")
+                ax8.axis("off")
+
+                ax9 = plt.subplot(3, 3, 9)
+                ax9.imshow(spec_pred, cmap="viridis")
+                ax9.set_title("Output Power Spectrum", fontsize=10, fontweight="bold")
+                ax9.axis("off")
 
             plt.tight_layout()
-            plt.savefig(out_dir / f"sample_{idx:03d}_detailed.png", dpi=150, bbox_inches="tight")
+            mode = extract_mode_from_filename(source_file)
+            plt.savefig(out_dir / f"sample_{idx:03d}_{mode}_detailed.png", dpi=150, bbox_inches="tight")
             plt.close()
 
     # Compute aggregate metrics
@@ -275,6 +364,9 @@ def main():
         std_radial_diff = np.std([m["radial_profile_diff"] for m in all_metrics["spectral_metrics"]])
         print(f"\nSpectral Metrics:")
         print(f"  Radial Profile Difference: {mean_radial_diff:.6f} ± {std_radial_diff:.6f}")
+        mean_aniso_diff = np.mean([m["anisotropy_diff"] for m in all_metrics["spectral_metrics"]])
+        std_aniso_diff = np.std([m["anisotropy_diff"] for m in all_metrics["spectral_metrics"]])
+        print(f"  Anisotropy Difference: {mean_aniso_diff:.6f} ± {std_aniso_diff:.6f}")
 
     # Generate aggregate spectral visualization
     if all_metrics["radial_profiles_gt"] and all_metrics["radial_profiles_pred"]:

@@ -96,19 +96,19 @@ def visualize_results(
 
 def main():
     # Configuration - small batch for quick testing
-    BATCH_SIZE = 4
-    NUM_EPOCHS = 20
+    BATCH_SIZE = 4  # Small batch for quick testing
+    NUM_EPOCHS = 50  # Extended test: 40 phase1 + 10 phase2
+    PHASE1_EPOCHS = 40  # Chamfer + Repulsion
+    PHASE2_EPOCHS = 10   # Sinkhorn + Chamfer
     NUM_TRAIN_SAMPLES = 200  # Small subset
     EVAL_EVERY = 5
     NUM_INFERENCE_STEPS = 30
     
-    # Loss weights (from our evaluation)
-    SINKHORN_WEIGHT = 1.0
-    CHAMFER_WEIGHT = 10.0
-    
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Device: {device}")
-    print(f"Sinkhorn weight: {SINKHORN_WEIGHT}, Chamfer weight: {CHAMFER_WEIGHT}")
+    print(f"V6 Scaled Test: 50 epochs (Phase 1: 0-39, Phase 2: 40-49)")
+    print(f"Phase 1: Chamfer=1.0, Repulsion=0.5")
+    print(f"Phase 2: Sinkhorn=1.0, Chamfer=1.0")
     
     # Create output directory
     output_dir = Path(__file__).parent / 'outputs_short_train'
@@ -125,17 +125,29 @@ def main():
         val_split=config.data.val_split,
     )
     
-    # Limit training data
-    train_iter = iter(train_loader)
-    train_data = []
-    for _ in range(NUM_TRAIN_SAMPLES // BATCH_SIZE):
-        try:
-            batch = next(train_iter)
-            train_data.append(batch)
-        except StopIteration:
-            break
+    # Randomly sample training data from full dataset
+    print(f"Randomly sampling {NUM_TRAIN_SAMPLES} samples from {len(train_loader.dataset)} total training samples")
     
-    print(f"Training on {len(train_data) * BATCH_SIZE} samples")
+    import random
+    random.seed(42)  # For reproducibility
+    torch.manual_seed(42)
+    
+    # Get random indices
+    total_samples = len(train_loader.dataset)
+    random_indices = random.sample(range(total_samples), NUM_TRAIN_SAMPLES)
+    
+    # Create subset dataset
+    from torch.utils.data import Subset, DataLoader
+    train_subset = Subset(train_loader.dataset, random_indices)
+    train_subset_loader = DataLoader(
+        train_subset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,  # Shuffle each epoch
+        num_workers=0,
+    )
+    
+    train_data = list(train_subset_loader)
+    print(f"Training on {len(train_data) * BATCH_SIZE} randomly sampled samples")
     
     # Get validation sample for consistent evaluation
     val_batch = next(iter(val_loader))
@@ -163,9 +175,26 @@ def main():
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
+    def get_phase_config(epoch):
+        """Get loss weights for current phase."""
+        if epoch <= PHASE1_EPOCHS:
+            return {
+                'chamfer_weight': 1.0,
+                'repulsion_weight': 0.5,
+                'sinkhorn_weight': 0.0,
+                'phase_name': 'Phase 1 (Chamfer+Repulsion)'
+            }
+        else:
+            return {
+                'chamfer_weight': 1.0,
+                'repulsion_weight': 0.0,
+                'sinkhorn_weight': 1.0,
+                'phase_name': 'Phase 2 (Sinkhorn+Chamfer 1:1)'
+            }
+    
     # Training loop
     history = {
-        'train_loss': [], 'chamfer': [], 'sinkhorn': [],
+        'train_loss': [], 'chamfer': [], 'sinkhorn': [], 'repulsion': [],
         'val_mean_nn': [], 'val_cv': [], 'val_chamfer': []
     }
     
@@ -174,9 +203,10 @@ def main():
     
     for epoch in range(1, NUM_EPOCHS + 1):
         model.train()
-        epoch_losses = {'loss': [], 'chamfer': [], 'sinkhorn': []}
+        phase_config = get_phase_config(epoch)
+        epoch_losses = {'loss': [], 'chamfer': [], 'sinkhorn': [], 'repulsion': []}
         
-        pbar = tqdm(train_data, desc=f"Epoch {epoch}/{NUM_EPOCHS}")
+        pbar = tqdm(train_data, desc=f"Epoch {epoch}/{NUM_EPOCHS} - {phase_config['phase_name']}")
         for batch in pbar:
             image = batch['image'].to(device)
             points = batch['points'].to(device)
@@ -185,8 +215,9 @@ def main():
             
             result = train_step(
                 model, scheduler, points, image, device,
-                sinkhorn_weight=SINKHORN_WEIGHT,
-                chamfer_weight=CHAMFER_WEIGHT,
+                sinkhorn_weight=phase_config['sinkhorn_weight'],
+                chamfer_weight=phase_config['chamfer_weight'],
+                repulsion_weight=phase_config['repulsion_weight'],
             )
             
             result['loss'].backward()
@@ -196,6 +227,8 @@ def main():
             epoch_losses['loss'].append(result['loss'].item())
             epoch_losses['chamfer'].append(result['chamfer'])
             epoch_losses['sinkhorn'].append(result['sinkhorn'])
+            if 'repulsion' in result:
+                epoch_losses['repulsion'].append(result['repulsion'])
             
             pbar.set_postfix({
                 'loss': f"{result['loss'].item():.4f}",
