@@ -43,10 +43,10 @@ from dataset import create_dataloaders
 
 
 # =============================================================================
-# Hybrid Training Configuration
+# Hybrid Training Configuration (No Spectral Loss)
 # =============================================================================
 PHASE1_EPOCHS = 40   # Chamfer + Repulsion (fast, position learning)
-PHASE2_EPOCHS = 10   # Sinkhorn + Chamfer (blue noise refinement, 1:1 ratio)
+PHASE2_EPOCHS = 10   # Sinkhorn + Chamfer (blue noise refinement)
 TOTAL_EPOCHS = PHASE1_EPOCHS + PHASE2_EPOCHS  # 50
 
 
@@ -54,40 +54,29 @@ def get_training_phase(epoch: int) -> dict:
     """Determine training phase and loss configuration for given epoch.
     
     Phase 1 (0-39): Chamfer + Repulsion - fast position learning
-    Phase 2 (40-49): Sinkhorn + Chamfer (1:1 ratio) - blue noise refinement
+    Phase 2 (40-49): Sinkhorn + Chamfer - blue noise refinement (1:1 ratio proven optimal in V5)
     
-    Note: Testing showed 1:1 ratio achieves CV=0.608±0.007, better than 10:1 ratio.
+    Note: Spectral loss was tested in V5 but degraded performance (CV worsened by 14.24%).
+    V6 uses pure architectural scaling (5.26M params) instead of adding complex losses.
     """
     if epoch < PHASE1_EPOCHS:
         return {
             'phase': 1,
             'name': 'chamfer_repulsion',
             'chamfer_weight': 1.0,
-            'repulsion_weight': 1.0,
+            'repulsion_weight': 0.5,
             'sinkhorn_weight': 0.0,
+            'spectral_weight': 0.0,  # Spectral loss adds overhead, skip phase 1
         }
-        # return {
-        #     'phase': 1,
-        #     'name': 'chamfer_repulsion',
-        #     'chamfer_weight': 1.0,
-        #     'repulsion_weight': 0.5,
-        #     'sinkhorn_weight': 0.0,
-        # }
     else:
         return {
             'phase': 2,
             'name': 'sinkhorn_chamfer',
-            'chamfer_weight': 10.0,
+            'chamfer_weight': 1.0,
             'repulsion_weight': 0.0,
             'sinkhorn_weight': 1.0,
+            'spectral_weight': 0.0,  # Disabled - spectral loss degraded performance in V5 testing
         }
-        # return {
-        #     'phase': 2,
-        #     'name': 'sinkhorn_chamfer',
-        #     'chamfer_weight': 1.0,
-        #     'repulsion_weight': 0.0,
-        #     'sinkhorn_weight': 1.0,
-        # }
 
 
 def train_epoch(
@@ -99,7 +88,7 @@ def train_epoch(
     epoch: int,
     config: Config,
 ):
-    """Train for one epoch with phase-appropriate loss."""
+    """Train for one epoch with phase-appropriate loss including spectral loss."""
     model.train()
     
     # Get loss configuration for this epoch
@@ -108,6 +97,7 @@ def train_epoch(
     total_loss = 0
     total_chamfer = 0
     total_secondary = 0  # repulsion or sinkhorn depending on phase
+    total_spectral = 0
     
     phase_name = phase_config['name']
     pbar = tqdm(dataloader, desc=f"Epoch {epoch} [{phase_name}]")
@@ -122,6 +112,7 @@ def train_epoch(
             sinkhorn_weight=phase_config['sinkhorn_weight'],
             chamfer_weight=phase_config['chamfer_weight'],
             repulsion_weight=phase_config['repulsion_weight'],
+            spectral_weight=phase_config.get('spectral_weight', 0.0),
         )
         loss = loss_dict['loss']
         
@@ -134,6 +125,7 @@ def train_epoch(
         # Logging - determine secondary loss based on weights
         total_loss += loss.item()
         total_chamfer += loss_dict['chamfer']
+        total_spectral += loss_dict.get('spectral', 0.0)
         
         if phase_config['sinkhorn_weight'] > 0:
             total_secondary += loss_dict.get('sinkhorn', 0.0)
@@ -144,24 +136,35 @@ def train_epoch(
             secondary_name = 'repulsion'
             secondary_val = loss_dict.get('repulsion', 0.0)
         
-        pbar.set_postfix({
+        # Build postfix with spectral if enabled
+        postfix = {
             'loss': f"{loss.item():.4f}",
             'chamfer': f"{loss_dict['chamfer']:.6f}",
             secondary_name: f"{secondary_val:.4f}",
-        })
+        }
+        if phase_config.get('spectral_weight', 0) > 0:
+            postfix['spectral'] = f"{loss_dict.get('spectral', 0.0):.4f}"
+        
+        pbar.set_postfix(postfix)
         
         if step % config.training.log_every == 0:
-            print(f"Epoch {epoch} [{phase_name}], Step {step}, Loss: {loss.item():.4f}, "
-                  f"Chamfer: {loss_dict['chamfer']:.6f}, {secondary_name}: {secondary_val:.4f}")
+            msg = f"Epoch {epoch} [{phase_name}], Step {step}, Loss: {loss.item():.4f}, " \
+                  f"Chamfer: {loss_dict['chamfer']:.6f}, {secondary_name}: {secondary_val:.4f}"
+            if phase_config.get('spectral_weight', 0) > 0:
+                msg += f", Spectral: {loss_dict.get('spectral', 0.0):.4f}"
+            print(msg)
     
     n_steps = len(dataloader)
-    return {
+    result = {
         'loss': total_loss / n_steps,
         'chamfer': total_chamfer / n_steps,
         'secondary': total_secondary / n_steps,
         'phase': phase_config['phase'],
         'phase_name': phase_name,
     }
+    if phase_config.get('spectral_weight', 0) > 0:
+        result['spectral'] = total_spectral / n_steps
+    return result
 
 
 @torch.no_grad()
@@ -219,7 +222,7 @@ def main():
     if config.training.use_wandb and HAS_WANDB:
         wandb.init(
             project=config.training.wandb_project,
-            name=config.training.wandb_run_name or "v5_hybrid",
+            name=config.training.wandb_run_name or "v6_hybrid",
             config={
                 'model_n_points': config.model.n_points,
                 'model_dim': config.model.dim,
@@ -372,8 +375,8 @@ def main():
     print(f"\n{'='*60}")
     print(f"HYBRID TRAINING STRATEGY")
     print(f"{'='*60}")
-    print(f"Phase 1 (epochs 0-{PHASE1_EPOCHS-1}): Chamfer + Repulsion")
-    print(f"Phase 2 (epochs {PHASE1_EPOCHS}-{TOTAL_EPOCHS-1}): Sinkhorn + Chamfer (1:1 ratio)")
+    print(f"Phase 1 (epochs 0-{PHASE1_EPOCHS-1}): Chamfer + Repulsion (~46 min/epoch)")
+    print(f"Phase 2 (epochs {PHASE1_EPOCHS}-{TOTAL_EPOCHS-1}): Sinkhorn + Chamfer (~103 min/epoch)")
     print(f"Total epochs: {TOTAL_EPOCHS}")
     print(f"Starting from epoch: {start_epoch}")
     print(f"{'='*60}\n")
@@ -404,8 +407,15 @@ def main():
             secondary_name = 'repulsion'
         
         print(f"\nEpoch {epoch} [Phase {phase_config['phase']}: {phase_config['name']}]:")
-        print(f"  Train Loss = {train_metrics['loss']:.4f} (Chamfer: {train_metrics['chamfer']:.6f}, {secondary_name}: {train_metrics['secondary']:.4f})")
-        print(f"  Val Loss = {val_metrics['loss']:.4f} (Chamfer: {val_metrics['chamfer']:.6f}, {secondary_name}: {val_metrics['secondary']:.4f})")
+        msg = f"  Train Loss = {train_metrics['loss']:.4f} (Chamfer: {train_metrics['chamfer']:.6f}, {secondary_name}: {train_metrics['secondary']:.4f})"
+        if phase_config.get('spectral_weight', 0) > 0 and 'spectral' in train_metrics:
+            msg += f", Spectral: {train_metrics['spectral']:.4f}"
+        print(msg)
+        
+        msg = f"  Val Loss = {val_metrics['loss']:.4f} (Chamfer: {val_metrics['chamfer']:.6f}, {secondary_name}: {val_metrics['secondary']:.4f})"
+        if phase_config.get('spectral_weight', 0) > 0 and 'spectral' in val_metrics:
+            msg += f", Spectral: {val_metrics['spectral']:.4f}"
+        print(msg)
         
         # Log to wandb
         if config.training.use_wandb and HAS_WANDB:
@@ -425,6 +435,13 @@ def main():
             else:
                 log_dict['train_repulsion'] = train_metrics['secondary']
                 log_dict['val_repulsion'] = val_metrics['secondary']
+            
+            # Log spectral loss if enabled
+            if phase_config.get('spectral_weight', 0) > 0:
+                if 'spectral' in train_metrics:
+                    log_dict['train_spectral'] = train_metrics['spectral']
+                if 'spectral' in val_metrics:
+                    log_dict['val_spectral'] = val_metrics['spectral']
             
             wandb.log(log_dict)
         

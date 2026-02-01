@@ -112,9 +112,9 @@ def main():
     # parser.add_argument('--seed', type=int, default=42, help='Random seed')
     args = parser.parse_args()
     
-    args.checkpoint = r"/groups/asharf_group/ofirgila/projection-conditioned-point-cloud-diffusion/outputs_pointdit_v5/checkpoint_best.pth"
+    args.checkpoint = r"/groups/asharf_group/ofirgila/projection-conditioned-point-cloud-diffusion/outputs_pointdit_v6/checkpoint_best.pth"
     args.image = r"/groups/asharf_group/ofirgila/ControlNet/training/fill50k-gs/source/55.png"
-    args.output =r"/groups/asharf_group/ofirgila/projection-conditioned-point-cloud-diffusion/experiments_pointdit_v5/outputs_pointdit_v5/sample_55/comparison"
+    args.output =r"/groups/asharf_group/ofirgila/projection-conditioned-point-cloud-diffusion/experiments_pointdit_v6/outputs_pointdit_v6/sample_55/comparison"
     args.num_inference_steps = 50
     args.seed = 42
     

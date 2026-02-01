@@ -6,13 +6,19 @@ from typing import Literal, Union
 
 @dataclass
 class ModelConfig:
-    """Point-DiT model configuration."""
+    """Point-DiT model configuration.
+    
+    V6 Upgraded (v6-scaled):
+    - Scaled from 1M params (dim=128, n_layers=4) to 5M params (dim=256, n_layers=6)
+    - This provides ~10x more computational capacity for learning complex N-body interactions
+    - Training speed ~1.5 hours/epoch (vs 0.75 hours for v5)
+    """
 
     # num_points: int = 4096
     n_points: int = 5000
-    dim: int = 128
-    n_layers: int = 4
-    n_heads: int = 4
+    dim: int = 256  # Increased from 128 for better capacity
+    n_layers: int = 6  # Increased from 4 for more self-attention rounds
+    n_heads: int = 8  # Increased from 4 to match larger dim
     image_size: int = 512
     dropout: float = 0.0
 
@@ -30,7 +36,7 @@ class DiffusionConfig:
 
 @dataclass
 class TrainingConfig:
-    """Training configuration."""
+    """Training configuration with spectral loss support."""
 
     batch_size: int = 8
     num_epochs: int = 50  # Phase 1 (40 epochs) + Phase 2 (10 epochs)
@@ -48,10 +54,14 @@ class TrainingConfig:
 
     use_wandb: bool = True
     wandb_project: str = "PointDiT"
-    wandb_run_name: Union[str, None] = "v5_hybrid"
+    wandb_run_name: Union[str, None] = "v6_scaled"
 
-    output_dir: str = "./outputs_pointdit_v5_hybrid"
+    output_dir: str = "./outputs_pointdit_v6_hybrid"
     checkpoint_path: Union[str, None] = None
+    
+    # Loss weights for Hybrid training
+    use_spectral_loss: bool = False  # Disabled - V5 testing showed spectral loss degraded performance
+    spectral_weight: float = 0.0  # Not used
 
 
 @dataclass

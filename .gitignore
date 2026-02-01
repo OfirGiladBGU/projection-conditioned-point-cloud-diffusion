@@ -150,6 +150,11 @@ lightning_logs/
 MNIST
 .DS_Store
 
+# Custom ignores
+archive*/
 data*/
 co3d*/
 outputs*/
+#tools/
+#tests/
+evaluation_results/

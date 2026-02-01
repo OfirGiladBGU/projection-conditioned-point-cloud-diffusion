@@ -147,13 +147,13 @@ def main():
     
     # Set defaults if not provided
     if args.checkpoint is None:
-        args.checkpoint = r"/groups/asharf_group/ofirgila/projection-conditioned-point-cloud-diffusion/outputs_pointdit_v5/checkpoint_best.pth"
+        args.checkpoint = r"/groups/asharf_group/ofirgila/projection-conditioned-point-cloud-diffusion/outputs_pointdit_v6/checkpoint_best.pth"
     if args.source is None:
         args.source = fr"/groups/asharf_group/ofirgila/ControlNet/training/data_grads_v3/source/{args.example_name}.png"
     if args.target is None:
         args.target = fr"/groups/asharf_group/ofirgila/ControlNet/training/data_grads_v3/target/{args.example_name}.png"
     if args.output is None:
-        args.output = fr"/groups/asharf_group/ofirgila/projection-conditioned-point-cloud-diffusion/experiments_pointdit_v5/outputs_pointdit_v5/eval_{args.example_name}/comparison"
+        args.output = fr"/groups/asharf_group/ofirgila/projection-conditioned-point-cloud-diffusion/experiments_pointdit_v6/outputs_pointdit_v6/eval_{args.example_name}/comparison"
     
     # Set seed
     torch.manual_seed(args.seed)
