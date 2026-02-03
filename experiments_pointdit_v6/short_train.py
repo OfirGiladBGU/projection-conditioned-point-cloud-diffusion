@@ -218,6 +218,7 @@ def main():
                 sinkhorn_weight=phase_config['sinkhorn_weight'],
                 chamfer_weight=phase_config['chamfer_weight'],
                 repulsion_weight=phase_config['repulsion_weight'],
+                use_ot_matching=True,  # CRITICAL FIX: Enable trajectory straightening
             )
             
             result['loss'].backward()
@@ -330,6 +331,24 @@ def main():
         final_chamfer = history['val_chamfer'][-1]
         print(f"Final Mean NN: {final_nn:.4f} (ratio={final_nn/gt_metrics['mean_nn']:.3f})")
         print(f"Final Chamfer: {final_chamfer:.6f}")
+    
+    # Save model weights
+    weights_path = output_dir / 'model_weights.pt'
+    torch.save({
+        'epoch': NUM_EPOCHS,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'history': history,
+        'config': {
+            'batch_size': BATCH_SIZE,
+            'num_epochs': NUM_EPOCHS,
+            'phase1_epochs': PHASE1_EPOCHS,
+            'phase2_epochs': PHASE2_EPOCHS,
+            'num_train_samples': NUM_TRAIN_SAMPLES,
+        },
+        'gt_metrics': gt_metrics,
+    }, weights_path)
+    print(f"  - Model weights: {weights_path}")
 
 
 if __name__ == "__main__":

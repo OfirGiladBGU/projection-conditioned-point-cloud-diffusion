@@ -113,6 +113,7 @@ def train_epoch(
             chamfer_weight=phase_config['chamfer_weight'],
             repulsion_weight=phase_config['repulsion_weight'],
             spectral_weight=phase_config.get('spectral_weight', 0.0),
+            use_ot_matching=True,  # CRITICAL FIX: Enable trajectory straightening
         )
         loss = loss_dict['loss']
         
@@ -193,6 +194,7 @@ def validate(
             sinkhorn_weight=phase_config['sinkhorn_weight'],
             chamfer_weight=phase_config['chamfer_weight'],
             repulsion_weight=phase_config['repulsion_weight'],
+            use_ot_matching=True,  # CRITICAL FIX: Enable trajectory straightening
         )
         total_loss += loss_dict['loss'].item()
         total_chamfer += loss_dict['chamfer']
