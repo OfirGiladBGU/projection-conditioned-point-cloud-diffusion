@@ -7,6 +7,13 @@ Key improvements over V5:
 4. Improved cross-attention with more capacity
 5. Gradient checkpointing option for memory efficiency
 
+V6.1 Enhancements (Tactile Density Sensors):
+6. Direct density input: Points receive local pixel intensity directly
+   - Concatenate image intensity at point location to point coordinates
+   - Input becomes (x, y, intensity) instead of just (x, y)
+   - Points immediately know "I am in a dark/light region"
+   - Creates stronger gradient for local spacing adjustment
+
 Target: Close the gap between direct optimization (0.75) and learned model (0.67)
 """
 
@@ -177,7 +184,7 @@ class EnhancedTransformerBlock(nn.Module):
 
 class PointDiTV6(nn.Module):
     """
-    Point-DiT V6: Enhanced capacity model.
+    Point-DiT V6: Enhanced capacity model with Tactile Density Sensors.
     
     Changes from V5:
     - dim: 128 → 256 (2x)
@@ -186,6 +193,12 @@ class PointDiTV6(nn.Module):
     - Image encoder: 3 stages → 5 stages with multi-scale
     - Feedforward: 2x → 4x dim
     - Separate self/cross attention
+    
+    V6.1 Enhancement: Tactile Density Input
+    - Points receive local pixel intensity directly concatenated to coordinates
+    - Input: (x, y, intensity) → dim=3 instead of dim=2
+    - Benefit: Points immediately know their local density requirement
+    - Result: Much stronger gradient for spacing adjustment
     
     Expected params: ~4M (vs 1M in V5)
     """
@@ -199,6 +212,7 @@ class PointDiTV6(nn.Module):
         image_size: int = 512,
         dropout: float = 0.0,
         use_multi_scale: bool = True,
+        use_density_input: bool = True,  # NEW: Tactile density sensors
     ):
         super().__init__()
 
@@ -206,6 +220,7 @@ class PointDiTV6(nn.Module):
         self.dim = dim
         self.image_size = image_size
         self.use_multi_scale = use_multi_scale
+        self.use_density_input = use_density_input  # NEW
 
         # 1) Deep multi-scale image encoder
         self.img_encoder = MultiScaleImageEncoder(out_dim=dim, base_ch=64)
@@ -225,8 +240,10 @@ class PointDiTV6(nn.Module):
         )
 
         # 4) Point embedding (with larger capacity)
+        # NEW: Accept 3D input (x, y, intensity) if using density sensors
+        point_input_dim = 3 if use_density_input else 2
         self.point_embed = nn.Sequential(
-            nn.Linear(2, dim),
+            nn.Linear(point_input_dim, dim),
             nn.LayerNorm(dim),
             nn.GELU(),
             nn.Linear(dim, dim),
@@ -295,6 +312,35 @@ class PointDiTV6(nn.Module):
         memory = self.fusion(context)  # (B, H*W, dim)
         
         return memory
+    
+    def _sample_density_at_points(self, x_t: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
+        """Sample image intensity at each point location.
+        
+        This is the "Tactile Sensor" - each point immediately knows the local density.
+        
+        Args:
+            x_t: (B, N, 2) point coordinates in [-1, 1]
+            image: (B, 1, H, W) image in [0, 1]
+        
+        Returns:
+            intensity: (B, N, 1) sampled intensity at each point
+        """
+        # grid_sample expects (B, N, 1, 2) for 2D points, output (B, 1, N, 1)
+        grid = x_t.unsqueeze(2)  # (B, N, 1, 2)
+        
+        # Sample using bilinear interpolation
+        # Note: grid_sample expects (x, y) in [-1, 1] which matches our coordinate system
+        intensity = F.grid_sample(
+            image, grid, 
+            mode='bilinear', 
+            padding_mode='border', 
+            align_corners=True
+        )  # (B, 1, N, 1)
+        
+        # Reshape to (B, N, 1)
+        intensity = intensity.squeeze(-1).transpose(1, 2)  # (B, N, 1)
+        
+        return intensity
 
     def forward(self, x_t: torch.Tensor, t: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
         B, N, _ = x_t.shape
@@ -302,8 +348,18 @@ class PointDiTV6(nn.Module):
         # Encode image
         memory = self._encode_image(image)
 
-        # Encode points and time
-        point_emb = self.point_embed(x_t)
+        # NEW: Tactile Density Input
+        # Sample image intensity at each point and concatenate to coordinates
+        if self.use_density_input:
+            intensity = self._sample_density_at_points(x_t, image)  # (B, N, 1)
+            x_t_input = torch.cat([x_t, intensity], dim=-1)  # (B, N, 3)
+        else:
+            x_t_input = x_t  # (B, N, 2)
+        
+        # Encode points (now with density info if enabled)
+        point_emb = self.point_embed(x_t_input)
+        
+        # Encode time
         if t.dim() == 2 and t.shape[1] == 1:
             t = t.squeeze(1)
         time_emb = self.time_embed(t).unsqueeze(1).expand(-1, N, -1)
@@ -464,14 +520,27 @@ if __name__ == "__main__":
     v5m = PointDiTV5_Medium(n_points=5000, dim=192, n_layers=5, n_heads=6)
     print(f"V5.5 (Medium):  {v5m.get_num_params():>10,} params")
     
-    # V6 (full)
-    v6 = PointDiTV6(n_points=5000, dim=256, n_layers=6, n_heads=8)
-    print(f"V6 (Enhanced):  {v6.get_num_params():>10,} params")
+    # V6 (full) - without density input for comparison
+    v6_no_density = PointDiTV6(n_points=5000, dim=256, n_layers=6, n_heads=8, use_density_input=False)
+    print(f"V6 (No Density): {v6_no_density.get_num_params():>10,} params")
+    
+    # V6.1 (full with density input)
+    v6 = PointDiTV6(n_points=5000, dim=256, n_layers=6, n_heads=8, use_density_input=True)
+    print(f"V6.1 (Density):  {v6.get_num_params():>10,} params")
     
     # Test forward pass
-    print("\nTesting forward pass (V6)...")
+    print("\nTesting forward pass (V6.1 with density input)...")
     x = torch.randn(2, 5000, 2)
     t = torch.randint(0, 1000, (2,))
-    img = torch.randn(2, 1, 512, 512)
+    img = torch.rand(2, 1, 512, 512)  # Use rand for [0,1] range
     out = v6(x, t, img)
     print(f"Output shape: {out.shape}")
+    
+    # Verify density sampling works
+    print("\nTesting density sampling...")
+    grid = x[:, :10, :].unsqueeze(2)  # First 10 points
+    intensity = torch.nn.functional.grid_sample(
+        img, grid, mode='bilinear', padding_mode='border', align_corners=True
+    ).squeeze(-1).transpose(1, 2)
+    print(f"Sampled intensities shape: {intensity.shape}")
+    print(f"Sample values: {intensity[0, :5, 0].tolist()}")

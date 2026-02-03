@@ -107,13 +107,16 @@ def train_epoch(
         points = batch['points'].to(device)
         
         # Forward pass with phase-appropriate loss
+        # V6.1: Use Hilbert sort for OT matching (fast approximation)
+        # Note: Exact Hungarian matching is available but too slow (O(N³))
         loss_dict = train_step(
             model, scheduler, points, image, device,
             sinkhorn_weight=phase_config['sinkhorn_weight'],
             chamfer_weight=phase_config['chamfer_weight'],
             repulsion_weight=phase_config['repulsion_weight'],
             spectral_weight=phase_config.get('spectral_weight', 0.0),
-            use_ot_matching=True,  # CRITICAL FIX: Enable trajectory straightening
+            use_ot_matching=True,   # Enable trajectory straightening (Hilbert sort)
+            use_exact_ot=False,     # Hungarian is O(N³), too slow for training
         )
         loss = loss_dict['loss']
         
@@ -189,12 +192,14 @@ def validate(
         image = batch['image'].to(device)
         points = batch['points'].to(device)
         
+        # V6.1: Use Hilbert sort for OT matching (fast approximation)
         loss_dict = train_step(
             model, scheduler, points, image, device,
             sinkhorn_weight=phase_config['sinkhorn_weight'],
             chamfer_weight=phase_config['chamfer_weight'],
             repulsion_weight=phase_config['repulsion_weight'],
-            use_ot_matching=True,  # CRITICAL FIX: Enable trajectory straightening
+            use_ot_matching=True,   # Enable trajectory straightening (Hilbert sort)
+            use_exact_ot=False,     # Hungarian is O(N³), too slow
         )
         total_loss += loss_dict['loss'].item()
         total_chamfer += loss_dict['chamfer']
@@ -258,6 +263,7 @@ def main():
     os.makedirs(config.training.output_dir, exist_ok=True)
     
     # Create model
+    # V6.1: Enable density input (Tactile Sensors) for better local spacing
     model = PointDiT(
         n_points=config.model.n_points,
         dim=config.model.dim,
@@ -265,9 +271,11 @@ def main():
         n_heads=config.model.n_heads,
         image_size=config.model.image_size,
         dropout=config.model.dropout,
+        use_density_input=getattr(config.model, 'use_density_input', True),  # V6.1 default
     ).to(device)
     
     print(f"Model parameters: {model.get_num_params():,}")
+    print(f"Density input enabled: {model.use_density_input}")
     
     # Create scheduler
     scheduler = DDPMScheduler(

@@ -6,6 +6,13 @@ V6 Scaling Upgrade:
 - Better equipped to learn crystalline point spacing through self-attention
 - Training: ~1.5 hours/epoch (vs 0.75 hours for v5)
 
+V6.1 Enhancement: Tactile Density Sensors
+- Direct density input: Points receive local pixel intensity directly
+- Concatenate image intensity at point location to point coordinates
+- Input becomes (x, y, intensity) instead of just (x, y)
+- Points immediately know "I am in a dark/light region"
+- Creates stronger gradient for local spacing adjustment
+
 Key design:
 - Shallow CNN encoder with GroupNorm (no BatchNorm) to avoid instability on binary masks
 - Fourier positional embeddings (high-frequency grid) for precise spatial conditioning
@@ -18,6 +25,7 @@ from typing import Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class FourierEmbedder(nn.Module):
@@ -74,6 +82,12 @@ class PointDiT(nn.Module):
     
     Upgraded from 1M to 5M parameters with dim=256, n_layers=6, n_heads=8.
     This provides sufficient capacity to learn complex N-body interactions.
+    
+    V6.1 Enhancement: Tactile Density Input
+    - Points receive local pixel intensity directly concatenated to coordinates
+    - Input: (x, y, intensity) → dim=3 instead of dim=2
+    - Benefit: Points immediately know their local density requirement
+    - Result: Much stronger gradient for spacing adjustment
     """
 
     def __init__(
@@ -84,12 +98,14 @@ class PointDiT(nn.Module):
         n_heads: int = 4,
         image_size: int = 512,
         dropout: float = 0.0,
+        use_density_input: bool = True,  # NEW: Tactile density sensors
     ):
         super().__init__()
 
         self.n_points = n_points
         self.dim = dim
         self.image_size = image_size
+        self.use_density_input = use_density_input  # NEW
 
         # 1) Stable image encoder: shallow CNN with GroupNorm; outputs 64x64 grid for 512x512 input
         self.img_encoder = nn.Sequential(
@@ -116,8 +132,10 @@ class PointDiT(nn.Module):
         )
 
         # 4) Point + time embeddings
+        # NEW: Accept 3D input (x, y, intensity) if using density sensors
+        point_input_dim = 3 if use_density_input else 2
         self.point_embed = nn.Sequential(
-            nn.Linear(2, dim),
+            nn.Linear(point_input_dim, dim),
             nn.SiLU(),
         )
 
@@ -184,12 +202,52 @@ class PointDiT(nn.Module):
         memory = self.fusion(context)                     # (B, H*W, dim)
         
         return memory, H, W
+    
+    def _sample_density_at_points(self, x_t: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
+        """Sample image intensity at each point location.
+        
+        This is the "Tactile Sensor" - each point immediately knows the local density.
+        
+        Args:
+            x_t: (B, N, 2) point coordinates in [-1, 1]
+            image: (B, 1, H, W) image in [0, 1]
+        
+        Returns:
+            intensity: (B, N, 1) sampled intensity at each point
+        """
+        # grid_sample expects (B, N, 1, 2) for 2D points, output (B, 1, N, 1)
+        grid = x_t.unsqueeze(2)  # (B, N, 1, 2)
+        
+        # Sample using bilinear interpolation
+        # Note: grid_sample expects (x, y) in [-1, 1] which matches our coordinate system
+        intensity = F.grid_sample(
+            image, grid, 
+            mode='bilinear', 
+            padding_mode='border', 
+            align_corners=True
+        )  # (B, 1, N, 1)
+        
+        # Reshape to (B, N, 1)
+        intensity = intensity.squeeze(-1).transpose(1, 2)  # (B, N, 1)
+        
+        return intensity
 
     def forward(self, x_t: torch.Tensor, t: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
         B, N, _ = x_t.shape
         memory, _, _ = self._encode_image(image)
 
-        point_emb = self.point_embed(x_t)
+        # NEW: Tactile Density Input
+        # Sample image intensity at each point and concatenate to coordinates
+        if self.use_density_input:
+            intensity = self._sample_density_at_points(x_t, image)  # (B, N, 1)
+            x_t_input = torch.cat([x_t, intensity], dim=-1)  # (B, N, 3)
+        else:
+            x_t_input = x_t  # (B, N, 2)
+        
+        # Encode points (now with density info if enabled)
+        point_emb = self.point_embed(x_t_input)
+        
+        # Encode time
         if t.dim() == 2 and t.shape[1] == 1:
             t = t.squeeze(1)
         time_emb = self.time_embed(t).unsqueeze(1).expand(-1, N, -1)
@@ -205,17 +263,30 @@ class PointDiT(nn.Module):
 
 if __name__ == "__main__":
     # V6 Scaled configuration: dim=256, n_layers=6, n_heads=8
-    model = PointDiT(n_points=2048, dim=256, n_layers=6, n_heads=8)
-    print(f"Point-DiT V6 Scaled (Fourier features, 5M params)")
-    print(f"Model parameters: {model.get_num_params():,}")
+    print("Point-DiT V6.1 with Tactile Density Sensors")
+    print("-" * 50)
+    
+    # Without density input
+    model_no_density = PointDiT(n_points=2048, dim=256, n_layers=6, n_heads=8, use_density_input=False)
+    print(f"V6 Scaled (no density): {model_no_density.get_num_params():,} params")
+    
+    # With density input (V6.1)
+    model = PointDiT(n_points=2048, dim=256, n_layers=6, n_heads=8, use_density_input=True)
+    print(f"V6.1 Scaled (with density): {model.get_num_params():,} params")
 
     x_t = torch.randn(2, 2048, 2)
     t = torch.randint(0, 1000, (2,))
-    image = torch.randn(2, 1, 512, 512)
+    image = torch.rand(2, 1, 512, 512)  # Use rand for [0,1] range
 
     with torch.no_grad():
         pred = model(x_t, t, image)
 
-    print(f"Input shape: {x_t.shape}")
+    print(f"\nInput shape: {x_t.shape}")
     print(f"Output shape: {pred.shape}")
     print("✓ Model forward pass successful")
+    
+    # Test density sampling
+    print("\nTesting density sampling...")
+    intensity = model._sample_density_at_points(x_t, image)
+    print(f"Sampled intensities shape: {intensity.shape}")
+    print(f"Sample values: {intensity[0, :5, 0].tolist()}")

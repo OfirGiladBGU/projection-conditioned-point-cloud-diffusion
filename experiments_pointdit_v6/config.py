@@ -1,4 +1,4 @@
-"""Configuration for Point-DiT experiments (V4 stable)."""
+"""Configuration for Point-DiT experiments (V6.1 with Exact OT + Density Input)."""
 
 from dataclasses import dataclass
 from typing import Literal, Union
@@ -8,7 +8,12 @@ from typing import Literal, Union
 class ModelConfig:
     """Point-DiT model configuration.
     
-    V6 Upgraded (v6-scaled):
+    V6.1 Enhancements:
+    - Tactile Density Sensors: Points receive local pixel intensity directly
+    - Input becomes (x, y, intensity) instead of just (x, y)
+    - Points immediately know their local density requirement
+    
+    V6 Scaling (base):
     - Scaled from 1M params (dim=128, n_layers=4) to 5M params (dim=256, n_layers=6)
     - This provides ~10x more computational capacity for learning complex N-body interactions
     - Training speed ~1.5 hours/epoch (vs 0.75 hours for v5)
@@ -21,17 +26,29 @@ class ModelConfig:
     n_heads: int = 8  # Increased from 4 to match larger dim
     image_size: int = 512
     dropout: float = 0.0
+    use_density_input: bool = True  # NEW V6.1: Tactile density sensors
 
 
 @dataclass
 class DiffusionConfig:
-    """Diffusion process configuration."""
+    """Diffusion process configuration.
+    
+    V6.1 Enhancement: Exact Optimal Transport Matching
+    - use_exact_ot: Use Hungarian algorithm for exact OT matching
+    - exact_ot_subsample: Subsample size for tractable computation
+    """
 
     num_train_timesteps: int = 1000
     num_inference_steps: int = 50
     beta_start: float = 1e-4
     beta_end: float = 0.02
     beta_schedule: Literal["linear", "cosine"] = "linear"
+    
+    # V6.1: Optimal Transport configuration
+    # Note: Exact Hungarian matching is O(N³) = extremely slow!
+    # For 5000 points: ~45 seconds per batch. Use only for research.
+    use_exact_ot: bool = False  # DISABLED - Hilbert sort is fast approximation
+    exact_ot_subsample: int = 500  # If enabled, subsample for speed
 
 
 @dataclass

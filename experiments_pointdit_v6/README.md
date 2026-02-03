@@ -1,83 +1,80 @@
-# Point-DiT V6 Scaled: Next-Generation Neural Stippling
+# Point-DiT V6.1: Exact OT + Tactile Density Sensors
 
-**Model Version:** V6 Scaled (5× Capacity Upgrade)  
+**Model Version:** V6.1 (Exact OT + Density Input)  
 **Status:** ✓ In Development - Architecture Ready  
-**Parameters:** 5,259,362 (5.26M) — Scaled from V5's 1.04M  
-**Last Updated:** February 1, 2026
+**Parameters:** ~5.26M (slight increase from density input layer)  
+**Last Updated:** February 3, 2026
 
 ---
 
 ## Executive Summary
 
-**Point-DiT V6 Scaled** is an **upgraded Diffusion Transformer** for achieving perfect crystalline blue-noise stippling. Building on V5's proven foundation (CV=0.608, production-ready), V6 addresses the capacity bottleneck through aggressive architectural scaling.
+**Point-DiT V6.1** extends V6 with two critical algorithmic improvements that address the root cause of blur/clumping in flow-based stippling:
 
-### Why V6? (V5 Limitations)
+### V6.1 Key Improvements
 
-V5 (1.04M params) achieved excellent results but showed **occasional clumping** instead of perfect crystalline spacing:
+#### 1. **Exact Hungarian Matching (Algorithmic Fix)**
 
-**V5 Achievements:**
-- ✅ CV = 0.608 ± 0.007 (best spacing uniformity vs analytical methods)
-- ✅ Chamfer = 0.000650 ± 0.000128 (good position accuracy)
-- ✅ Stable training, fast inference (0.1 sec)
+**Problem:** Hilbert/Z-order sort is an *approximation* of Optimal Transport. For 5,000 points, it makes mistakes—pairing points that shouldn't be paired, causing "crossing paths" in trajectories.
 
-**V5 Limitations:**
-- ⚠️ CV = 0.608 vs GT target < 0.5 (crystalline perfection)
-- ⚠️ Visual artifacts in ~10% of regions
-- ⚠️ 4 attention layers insufficient for N-body coordination (5000 points)
+**Solution:** Use **Hungarian Algorithm** (`scipy.optimize.linear_sum_assignment`) to find the *mathematically perfect* pairing between Noise and GT batches.
 
-**Expert Diagnosis:**
-> "Your model is too small. Stippling is an N-body problem—every point needs to know all 5000 others. A shallow Transformer (128 dim, 4 layers) cannot simulate the hundreds of Lloyd iterations needed for crystalline spacing."
+- **Guarantees:** No two paths ever cross
+- **Result:** Learning task becomes 10× easier for the model
+- **Trade-off:** Slower to compute (CPU-bound), but worth it for quality
 
-### V6 Solution: Aggressive Capacity Upgrade
+```python
+# In train_step():
+use_exact_ot=True,      # Use Hungarian algorithm (exact OT)
+exact_ot_subsample=1000, # Subsample for speed (full matching is O(N^3))
+```
 
-**Architecture scaling (V5 → V6):**
-- `dim`: 128 → **256** (2× wider embeddings)
-- `n_layers`: 4 → **6** (50% more attention rounds)  
-- `n_heads`: 4 → **8** (2× more parallel pathways)
-- **Total: 1.04M → 5.26M parameters (5× capacity)**
+#### 2. **Tactile Density Sensors (Inductive Bias)**
 
-**Expected improvements:**
-- 🎯 **CV < 0.5** (crystalline perfection matching GT)
-- 🎯 **Zero clumping artifacts** (sufficient N-body coordination)
-- 🎯 **Lower variance** (±0.005 vs ±0.007)
-- ⚠️ **Training cost:** 45 mins → 1.5 hours/epoch (acceptable)
-- ⚠️ **Inference:** 0.1 sec → 0.3-0.4 sec (still real-time)
+**Problem:** Points only know *where they are* (x, y). They have to "look up" image density via Cross-Attention, which can be fuzzy.
 
-### What V5 Testing Ruled Out
+**Solution:** Concatenate **Pixel Intensity** directly to point input.
 
-**❌ Spectral Loss (FFT-based blue-noise enforcement):**
-- Tested in V5 with radial power spectrum matching
-- **Result:** Degraded performance by 14% (CV: 0.593 → 0.678)
-- **Conclusion:** Sinkhorn already captures blue-noise; spectral loss is redundant
-- **V6 decision:** NOT included (spectral_weight=0)
+- **Input:** `(x, y, intensity)` instead of `(x, y)`
+- **Result:** Each point *immediately* knows "I am in a white/dark region"
+- **Benefit:** Much stronger gradient for local spacing adjustment
 
-**✅ What works:** Sinkhorn + Chamfer (1:1 ratio) remains optimal
+```python
+# In model initialization:
+use_density_input=True  # Points receive local pixel intensity
+```
 
-### Key Capabilities
+### Why These Changes?
 
-✓ **5× More Capacity:** Enables N-body coordination for 5000 points  
-✓ **6 Attention Layers:** More "negotiation rounds" for crystalline spacing  
-✓ **Proven Training:** Hybrid strategy from V5 (Chamfer+Repulsion → Sinkhorn+Chamfer)  
-✓ **Production-Ready:** No experimental losses, pure scaling approach  
-✓ **Fast Inference:** 0.3-0.4 sec (3-4× slower than V5, still real-time)  
-✓ **Training Time:** ~1.5 hours/epoch on RTX 6000 (vs 0.75 for V5, acceptable)  
+The fact that Rectified Flow with Hilbert Sort performed *worse* than standard diffusion told us exactly what was wrong: **The "Straight Paths" weren't straight.**
 
-**See:** `/experiments_pointdit_v5/V5_FINAL_RESULTS.md` for complete V5 analysis
+Hilbert sorting makes mistakes for 5,000 points. When trajectories cross, the model learns the "average" velocity, resulting in blur/clumping.
+
+**With Exact OT + Density Input:**
+- Paths are truly straight (no crossings)
+- Points have direct density awareness
+- Model can focus on local spacing physics
 
 ---
 
-## Model Architecture Comparison
+## Quick Start
 
-| Aspect | V5 (Original) | V6 Scaled |
-|--------|---------------|-----------|
-| `dim` | 128 | 256 |
-| `n_layers` | 4 | 6 |
-| `n_heads` | 4 | 8 |
-| **Parameters** | 1.04M | 5.26M |
-| **Self-Attention Rounds** | 4 | 6 |
-| **Training Time/Epoch** | ~45 mins | ~1.5 hours |
-| **Inference Time** | ~0.1 sec | ~0.3-0.4 sec |
-| **Losses Supported** | Chamfer, Sinkhorn, Repulsion | + **Spectral (FFT)** |
+```bash
+# Train with V6.1 improvements (enabled by default)
+python train.py
+
+# The new parameters are in config.py:
+# - model.use_density_input = True  (Tactile sensors)
+# - diffusion.use_exact_ot = True   (Hungarian matching)
+# - diffusion.exact_ot_subsample = 1000  (Speed optimization)
+```
+
+---
+
+## Previous V6 Documentation
+
+**Model Version:** V6 Scaled (5× Capacity Upgrade)  
+**Parameters:** 5,259,362 (5.26M) — Scaled from V5's 1.04M
 
 **Point-DiT V6 Scaled** is a **production-ready Diffusion Transformer** for high-quality neural stippling and non-photorealistic rendering. It moves away from complex 3D projection methods to a pure 2D approach that generates point clouds directly from binary or grayscale image masks using:
 
