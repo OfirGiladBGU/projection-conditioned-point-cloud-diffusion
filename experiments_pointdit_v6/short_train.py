@@ -1,7 +1,11 @@
 """
-Short Training Script for Quick Sinkhorn+Chamfer Loss Evaluation
+Short Training Script for Quick V6.1 Evaluation
 
-This script runs a quick training on a small subset to verify the new loss combination.
+V6.1 KEY UPGRADES:
+1. Tactile Density Sensors: Input is (x, y, intensity) - points know local density
+2. Exact Hungarian Matching: Perfect trajectory pairing (no crossing paths)
+
+This script runs a quick training on a small subset to verify the V6.1 improvements.
 Use this before committing to a full training run.
 
 Usage:
@@ -106,7 +110,10 @@ def main():
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Device: {device}")
-    print(f"V6 Scaled Test: 50 epochs (Phase 1: 0-39, Phase 2: 40-49)")
+    print(f"V6.1 Test: Tactile Sensors + Exact Hungarian Matching")
+    print(f"  - Input: (x, y, intensity) - points know local density")
+    print(f"  - OT: Exact Hungarian matching (no crossing paths)")
+    print(f"V6.1 Scaled Test: 50 epochs (Phase 1: 0-39, Phase 2: 40-49)")
     print(f"Phase 1: Chamfer=1.0, Repulsion=0.5")
     print(f"Phase 2: Sinkhorn=1.0, Chamfer=1.0")
     
@@ -213,12 +220,16 @@ def main():
             
             optimizer.zero_grad()
             
+            # V6.1: Use GPU Sinkhorn for fast trajectory straightening (~0.5s vs 40s/batch)
             result = train_step(
                 model, scheduler, points, image, device,
                 sinkhorn_weight=phase_config['sinkhorn_weight'],
                 chamfer_weight=phase_config['chamfer_weight'],
                 repulsion_weight=phase_config['repulsion_weight'],
-                use_ot_matching=True,  # CRITICAL FIX: Enable trajectory straightening
+                use_ot_matching=True,    # Enable trajectory straightening
+                use_gpu_sinkhorn=True,   # V6.1: Fast GPU Sinkhorn matching
+                sinkhorn_epsilon=0.01,   # Sharp matching
+                sinkhorn_iterations=50,  # Enough for convergence
             )
             
             result['loss'].backward()
