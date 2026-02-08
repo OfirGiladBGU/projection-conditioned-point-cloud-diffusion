@@ -26,8 +26,8 @@
 
 All the losses are applied on the model final output:
 
-[USE] Chamfer -> (pred_x0, x_0) -> Compares predicted points to Ground Truth points.
-[USE] Sinkhorn -> (pred_x0, image) -> Checks if predicted points match the image density.
-[USE] Repulsion -> (pred_x0)-> Checks if predicted points are spacing themselves out (internal geometry).
-[NOT] Grid Density -> (pred_x0, image) -> Checks if predicted point density matches image density at multiple scales.
-[NOT] Spectral -> (pred_x0, x_0)-> Checks if the frequency "fingerprint" of the prediction matches the GT.
+* [USE] Chamfer -> (pred_x0, x_0) -> Compares predicted points to Ground Truth points.
+* [USE] Sinkhorn -> (pred_x0, image) -> Checks if predicted points match the image density.
+* [USE] Repulsion -> (pred_x0)-> Checks if predicted points are spacing themselves out (internal geometry).
+* [NOT] Grid Density -> (pred_x0, image) -> Checks if predicted point density matches image density at multiple scales.
+* [NOT] Spectral -> (pred_x0, x_0)-> Checks if the frequency "fingerprint" of the prediction matches the GT.
