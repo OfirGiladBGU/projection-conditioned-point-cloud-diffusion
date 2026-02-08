@@ -326,15 +326,13 @@ def main():
             sinkhorn_weight=config.training.sinkhorn_weight,
             repulsion_weight=config.training.repulsion_weight,
             gt_weight=config.training.gt_weight,
-            base_radius=config.training.base_radius,
-            sinkhorn_blur=config.training.sinkhorn_blur,
         ).to(device)
     else:
         print("  Pure unsupervised mode (no GT)")
         loss_fn = UnsupervisedStipplingLoss(
             sinkhorn_weight=config.training.sinkhorn_weight,
             repulsion_weight=config.training.repulsion_weight,
-            base_radius=config.training.base_radius,
+            repulsion_base_radius=config.training.base_radius,
             sinkhorn_blur=config.training.sinkhorn_blur,
         ).to(device)
     
