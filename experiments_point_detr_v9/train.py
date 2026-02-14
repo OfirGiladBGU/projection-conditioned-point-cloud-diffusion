@@ -11,6 +11,7 @@ Benefits:
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from tqdm import tqdm
@@ -92,6 +93,7 @@ def train_step_unsupervised(
     model: nn.Module,
     loss_fn: nn.Module,
     device: str,
+    config: Config,
 ) -> tuple:
     """Single UNSUPERVISED training step.
     
@@ -108,10 +110,32 @@ def train_step_unsupervised(
     """
     image = batch['image'].to(device)
     
-    # Fast initialization (density-based point placement)
+    # Initialization in [0, 1] for model input
     with torch.no_grad():
-        init_points = fast_density_initialization(image, model.n_points)
-        input_vecs = create_point_input_vectors(init_points, image)
+        init_points = torch.rand(image.shape[0], model.n_points, 2, device=device)
+        grid = (init_points * 2.0 - 1.0).unsqueeze(2)
+        intensities = F.grid_sample(
+            image,
+            grid,
+            mode="bilinear",
+            padding_mode="border",
+            align_corners=True,
+        ).squeeze(-1).squeeze(1).unsqueeze(-1)
+        input_vecs = torch.cat([init_points, intensities], dim=-1)
+
+        # Explicit target sampling in [0, 1]
+        img_norm = image.float()
+        min_val = img_norm.amin(dim=(2, 3), keepdim=True)
+        max_val = img_norm.amax(dim=(2, 3), keepdim=True)
+        img_norm = (img_norm - min_val) / (max_val - min_val + 1e-6)
+        density = (1.0 - img_norm).clamp(min=0.0, max=1.0).pow(config.training.sinkhorn_gamma)
+        B, _, H, W = density.shape
+        flat = density.view(B, -1)
+        probs = flat / (flat.sum(dim=1, keepdim=True) + 1e-6)
+        indices = torch.multinomial(probs, model.n_points, replacement=True)
+        y_idx = torch.div(indices, W, rounding_mode='floor').float()
+        x_idx = (indices % W).float()
+        target_points_01 = torch.stack([x_idx / (W - 1), y_idx / (H - 1)], dim=-1)
     
     # Forward pass
     pred_points = model(input_vecs, image)
@@ -120,10 +144,18 @@ def train_step_unsupervised(
     # No GT needed - loss purely from physics constraints!
     if isinstance(loss_fn, HybridStipplingLoss) and 'lloyd_points' in batch and batch['lloyd_points'] is not None:
         lloyd_points = batch['lloyd_points'].to(device)
-        loss, loss_dict = loss_fn(pred_points, image, lloyd_points)
+        loss, loss_dict = loss_fn(pred_points, image, lloyd_points, target_points_01=target_points_01)
     else:
-        loss, loss_dict = loss_fn(pred_points, image)
+        loss, loss_dict = loss_fn(pred_points, image, target_points_01=target_points_01)
     
+    # Debug range check
+    if 'debug_step' in batch and batch['debug_step'] % config.training.log_every == 0:
+        pred_01 = pred_points
+        print(
+            f"DEBUG RANGE: Pred [{pred_01.min():.2f}, {pred_01.max():.2f}] | "
+            f"Target [{target_points_01.min():.2f}, {target_points_01.max():.2f}]"
+        )
+
     return loss, loss_dict
 
 
@@ -154,55 +186,56 @@ def train_epoch(
     
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
     
-    for batch_idx, batch in enumerate(pbar):
-        try:
+        for batch_idx, batch in enumerate(pbar):
+            try:
+                batch['debug_step'] = batch_idx
             # Forward pass (UNSUPERVISED)
-            loss, loss_dict = train_step_unsupervised(batch, model, loss_fn, device)
+                loss, loss_dict = train_step_unsupervised(batch, model, loss_fn, device, config)
             
             # Backward pass
-            optimizer.zero_grad()
-            loss.backward()
+                optimizer.zero_grad()
+                loss.backward()
             
             # Gradient clipping
-            nn.utils.clip_grad_norm_(model.parameters(), config.training.max_grad_norm)
+                nn.utils.clip_grad_norm_(model.parameters(), config.training.max_grad_norm)
             
             # Update
-            optimizer.step()
-            if scheduler is not None:
-                scheduler.step()
+                optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
             
             # Accumulate losses
-            for key in losses_accum:
-                if key in loss_dict:
-                    losses_accum[key] += loss_dict[key]
-            num_batches += 1
+                for key in losses_accum:
+                    if key in loss_dict:
+                        losses_accum[key] += loss_dict[key]
+                num_batches += 1
             
             # Update progress bar
-            pbar.set_postfix({
-                'loss': loss.item(),
-                'sinkhorn': loss_dict.get('sinkhorn_loss', 0),
-                'repulsion': loss_dict.get('repulsion_loss', 0),
-                'render': loss_dict.get('render_loss', 0),
-                'lr': optimizer.param_groups[0]['lr'],
-            })
+                pbar.set_postfix({
+                    'loss': loss.item(),
+                    'sinkhorn': loss_dict.get('sinkhorn_loss', 0),
+                    'repulsion': loss_dict.get('repulsion_loss', 0),
+                    'render': loss_dict.get('render_loss', 0),
+                    'lr': optimizer.param_groups[0]['lr'],
+                })
             
             # Log
-            if (batch_idx + 1) % config.training.log_every == 0:
-                log_dict = {
-                    'epoch': epoch,
-                    'batch': batch_idx,
-                    'learning_rate': optimizer.param_groups[0]['lr'],
-                }
-                log_dict.update(loss_dict)
-                
-                if HAS_WANDB and config.training.use_wandb:
-                    wandb.log(log_dict)
-        
-        except Exception as e:
-            print(f"Error in batch {batch_idx}: {e}")
-            import traceback
-            traceback.print_exc()
-            continue
+                if (batch_idx + 1) % config.training.log_every == 0:
+                    log_dict = {
+                        'epoch': epoch,
+                        'batch': batch_idx,
+                        'learning_rate': optimizer.param_groups[0]['lr'],
+                    }
+                    log_dict.update(loss_dict)
+                    
+                    if HAS_WANDB and config.training.use_wandb:
+                        wandb.log(log_dict)
+            
+            except Exception as e:
+                print(f"Error in batch {batch_idx}: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
     
     # Average metrics
     metrics = {}
@@ -234,7 +267,7 @@ def val_step(
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Validation"):
             try:
-                loss, loss_dict = train_step_unsupervised(batch, model, loss_fn, device)
+                loss, loss_dict = train_step_unsupervised(batch, model, loss_fn, device, config)
                 
                 for key in losses_accum:
                     if key in loss_dict:
@@ -333,6 +366,11 @@ def main():
             render_weight=config.training.render_weight,
             render_grid_size=config.training.render_grid_size,
             render_sigma=config.training.render_sigma,
+            sinkhorn_mode=config.training.sinkhorn_mode,
+            sinkhorn_gamma=config.training.sinkhorn_gamma,
+            repulsion_decay=config.training.repulsion_decay,
+            repulsion_epsilon=config.training.repulsion_epsilon,
+            repulsion_max_loss=config.training.repulsion_max_loss,
             gt_weight=config.training.gt_weight,
         ).to(device)
     else:
@@ -345,6 +383,11 @@ def main():
             render_weight=config.training.render_weight,
             render_grid_size=config.training.render_grid_size,
             render_sigma=config.training.render_sigma,
+            sinkhorn_mode=config.training.sinkhorn_mode,
+            sinkhorn_gamma=config.training.sinkhorn_gamma,
+            repulsion_decay=config.training.repulsion_decay,
+            repulsion_epsilon=config.training.repulsion_epsilon,
+            repulsion_max_loss=config.training.repulsion_max_loss,
         ).to(device)
     
     # Training loop

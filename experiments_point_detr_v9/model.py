@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
 
-from layers import RefinementBlock
+from layers import RefinementBlock, SinePositionalEncoding2D
 
 
 class FourierEmbedder(nn.Module):
@@ -73,6 +73,8 @@ class StippleRefiner(nn.Module):
             )
             self.feature_proj = None
             backbone_output_channels = dim
+
+        self.pos_encoder = None
 
         # ===== 2. POSITIONAL EMBEDDINGS =====
         self.fourier_embed = FourierEmbedder(num_freqs=fourier_freqs, temperature=fourier_temperature)
@@ -143,6 +145,11 @@ class StippleRefiner(nn.Module):
 
         B, C, feat_h, feat_w = img_feats.shape
 
+        if self.pos_encoder is None or getattr(self.pos_encoder, "positional_encoding").shape[1:3] != (feat_h, feat_w):
+            self.pos_encoder = SinePositionalEncoding2D(C, feat_h, feat_w).to(image.device)
+
+        img_feats = self.pos_encoder(img_feats)
+
         y_raw = torch.linspace(-1, 1, feat_h, device=image.device)
         x_raw = torch.linspace(-1, 1, feat_w, device=image.device)
         grid_y, grid_x = torch.meshgrid(y_raw, x_raw, indexing="ij")
@@ -160,7 +167,8 @@ class StippleRefiner(nn.Module):
         return memory, feat_h, feat_w
 
     def _sample_intensity(self, points: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
-        grid = points.unsqueeze(2)
+        # Map [0, 1] -> [-1, 1] for grid_sample
+        grid = (points * 2.0 - 1.0).unsqueeze(2)
         intensities = F.grid_sample(
             image,
             grid,
@@ -195,7 +203,7 @@ class StippleRefiner(nn.Module):
             if self.delta_scale is not None:
                 delta = delta * self.delta_scale
             current_points = current_points + delta
-            current_points = torch.clamp(current_points, min=-1.0, max=1.0)
+            current_points = torch.clamp(current_points, min=0.0, max=1.0)
 
         return current_points
 

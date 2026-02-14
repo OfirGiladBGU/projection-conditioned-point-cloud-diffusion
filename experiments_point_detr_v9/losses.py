@@ -21,6 +21,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple, Optional
+import warnings
 
 # Try to import geomloss for Sinkhorn
 try:
@@ -75,8 +76,8 @@ class SinkhornDensityLoss(nn.Module):
             self.loss_fn = None
         
         # Create fixed coordinate grid for target density [-1, 1]
-        y = torch.linspace(-1, 1, grid_size)
-        x = torch.linspace(-1, 1, grid_size)
+        y = torch.linspace(0, 1, grid_size)
+        x = torch.linspace(0, 1, grid_size)
         grid_y, grid_x = torch.meshgrid(y, x, indexing='ij')
         self.register_buffer('target_coords', torch.stack([grid_x, grid_y], dim=-1).reshape(1, -1, 2))
     
@@ -122,6 +123,96 @@ class SinkhornDensityLoss(nn.Module):
         loss = self.loss_fn(source_weights, source_coords, target_weights, target_coords)
         
         return loss.mean()
+
+
+class SampledSinkhornLoss(nn.Module):
+    """Sample target points from image density and compare in [0, 1] coords."""
+
+    def __init__(self, blur: float = 0.05, scaling: float = 0.5, p: int = 2, gamma: float = 3.0):
+        super().__init__()
+        self.blur = blur
+        self.scaling = scaling
+        self.p = p
+        self.gamma = gamma
+
+        if HAS_GEOMLOSS:
+            self.loss_fn = SamplesLoss(
+                loss="sinkhorn",
+                p=p,
+                blur=blur,
+                scaling=scaling,
+                debias=True,
+                backend="tensorized",
+            )
+        else:
+            self.loss_fn = None
+
+    def forward(
+        self,
+        pred_points: torch.Tensor,
+        input_images: torch.Tensor,
+        target_points_01: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if not HAS_GEOMLOSS:
+            return torch.tensor(0.0, device=pred_points.device, requires_grad=True)
+
+        B, N, _ = pred_points.shape
+        device = pred_points.device
+
+        if target_points_01 is None:
+            images = input_images.float()
+            min_val = images.amin(dim=(2, 3), keepdim=True)
+            max_val = images.amax(dim=(2, 3), keepdim=True)
+            images = (images - min_val) / (max_val - min_val + 1e-6)
+
+            density = (1.0 - images).clamp(min=0.0, max=1.0).pow(self.gamma)
+            B, _, H, W = density.shape
+            flat = density.view(B, -1)
+            probs = flat / (flat.sum(dim=1, keepdim=True) + 1e-6)
+
+            indices = torch.multinomial(probs, N, replacement=True)
+            y_idx = torch.div(indices, W, rounding_mode="floor").float()
+            x_idx = (indices % W).float()
+            target_points = torch.stack([x_idx / (W - 1), y_idx / (H - 1)], dim=-1)
+        else:
+            target_points = target_points_01
+
+        # Sanitize to avoid NaN/Inf breaking Sinkhorn schedule
+        pred_points = torch.nan_to_num(pred_points, nan=0.5, posinf=1.0, neginf=0.0)
+        target_points = torch.nan_to_num(target_points, nan=0.5, posinf=1.0, neginf=0.0)
+        pred_points = pred_points.clamp(0.0, 1.0)
+        target_points = target_points.clamp(0.0, 1.0)
+
+        try:
+            loss = self.loss_fn(pred_points, target_points)
+        except Exception as exc:
+            warnings.warn(f"SampledSinkhornLoss failed: {exc}")
+            return torch.tensor(0.0, device=pred_points.device, requires_grad=True)
+
+        return loss.mean()
+
+
+class SoftRepulsionLoss(nn.Module):
+    """Soft inverse-distance repulsion in [0, 1] coordinates."""
+
+    def __init__(self, decay: float = 1.0, epsilon: float = 1e-5, max_loss: float = 100.0):
+        super().__init__()
+        self.decay = decay
+        self.epsilon = epsilon
+        self.max_loss = max_loss
+
+    def forward(self, points: torch.Tensor) -> torch.Tensor:
+        B, N, _ = points.shape
+        dist_sq = torch.sum((points.unsqueeze(1) - points.unsqueeze(2)) ** 2, dim=-1)
+
+        eye = torch.eye(N, device=points.device).unsqueeze(0)
+        dist_sq = dist_sq + eye
+
+        repulsion = 1.0 / (dist_sq ** (self.decay / 2.0) + self.epsilon)
+        repulsion = repulsion * (1.0 - eye)
+        repulsion = torch.clamp(repulsion, max=self.max_loss)
+        loss = torch.sum(repulsion) / (N * (N - 1))
+        return loss
 
 
 class AdaptiveRepulsionLoss(nn.Module):
@@ -209,8 +300,8 @@ class DifferentiableRasterizer(nn.Module):
         self.sigma = sigma
         self.normalize = normalize
 
-        y = torch.linspace(-1, 1, grid_size)
-        x = torch.linspace(-1, 1, grid_size)
+        y = torch.linspace(0, 1, grid_size)
+        x = torch.linspace(0, 1, grid_size)
         grid_y, grid_x = torch.meshgrid(y, x, indexing="ij")
         coords = torch.stack([grid_x, grid_y], dim=-1).reshape(-1, 2)
         self.register_buffer("grid_coords", coords)
@@ -278,7 +369,12 @@ class UnsupervisedStipplingLoss(nn.Module):
         render_weight: float = 0.3,
         sinkhorn_blur: float = 0.05,
         sinkhorn_grid_size: int = 32,
+        sinkhorn_mode: str = "sampled",
+        sinkhorn_gamma: float = 3.0,
         repulsion_base_radius: float = 0.02,
+        repulsion_decay: float = 1.0,
+        repulsion_epsilon: float = 1e-5,
+        repulsion_max_loss: float = 100.0,
         render_grid_size: int = 64,
         render_sigma: float = 0.02,
     ):
@@ -296,13 +392,22 @@ class UnsupervisedStipplingLoss(nn.Module):
         self.sinkhorn_weight = sinkhorn_weight
         self.repulsion_weight = repulsion_weight
         self.render_weight = render_weight
+        self.sinkhorn_mode = sinkhorn_mode
         
-        self.sinkhorn = SinkhornDensityLoss(
-            blur=sinkhorn_blur,
-            grid_size=sinkhorn_grid_size,
-        )
-        self.repulsion = AdaptiveRepulsionLoss(
-            base_radius=repulsion_base_radius,
+        if sinkhorn_mode == "sampled":
+            self.sinkhorn = SampledSinkhornLoss(
+                blur=sinkhorn_blur,
+                gamma=sinkhorn_gamma,
+            )
+        else:
+            self.sinkhorn = SinkhornDensityLoss(
+                blur=sinkhorn_blur,
+                grid_size=sinkhorn_grid_size,
+            )
+        self.repulsion = SoftRepulsionLoss(
+            decay=repulsion_decay,
+            epsilon=repulsion_epsilon,
+            max_loss=repulsion_max_loss,
         )
         self.render = RenderLoss(grid_size=render_grid_size, sigma=render_sigma)
     
@@ -310,6 +415,7 @@ class UnsupervisedStipplingLoss(nn.Module):
         self,
         pred_points: torch.Tensor,
         input_images: torch.Tensor,
+        target_points_01: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, dict]:
         """
         Compute unsupervised stippling loss.
@@ -323,10 +429,13 @@ class UnsupervisedStipplingLoss(nn.Module):
             loss_dict: Component losses for logging
         """
         # Capacity loss (density matching via optimal transport)
-        sinkhorn_loss = self.sinkhorn(pred_points, input_images)
+        if self.sinkhorn_mode == "sampled":
+            sinkhorn_loss = self.sinkhorn(pred_points, input_images, target_points_01=target_points_01)
+        else:
+            sinkhorn_loss = self.sinkhorn(pred_points, input_images)
         
         # Spacing loss (blue noise via adaptive repulsion)
-        repulsion_loss = self.repulsion(pred_points, input_images)
+        repulsion_loss = self.repulsion(pred_points)
         
         # Render loss (tone/shape matching)
         render_loss = self.render(pred_points, input_images)
@@ -367,6 +476,11 @@ class HybridStipplingLoss(nn.Module):
         gt_weight: float = 0.0,  # Set > 0 to add GT supervision
         render_grid_size: int = 64,
         render_sigma: float = 0.02,
+        sinkhorn_mode: str = "sampled",
+        sinkhorn_gamma: float = 3.0,
+        repulsion_decay: float = 1.0,
+        repulsion_epsilon: float = 1e-5,
+        repulsion_max_loss: float = 100.0,
     ):
         super().__init__()
         self.unsupervised = UnsupervisedStipplingLoss(
@@ -375,6 +489,11 @@ class HybridStipplingLoss(nn.Module):
             render_weight=render_weight,
             render_grid_size=render_grid_size,
             render_sigma=render_sigma,
+            sinkhorn_mode=sinkhorn_mode,
+            sinkhorn_gamma=sinkhorn_gamma,
+            repulsion_decay=repulsion_decay,
+            repulsion_epsilon=repulsion_epsilon,
+            repulsion_max_loss=repulsion_max_loss,
         )
         self.gt_weight = gt_weight
         self.chamfer = ChamferLoss()
@@ -384,9 +503,14 @@ class HybridStipplingLoss(nn.Module):
         pred_points: torch.Tensor,
         input_images: torch.Tensor,
         gt_points: Optional[torch.Tensor] = None,
+        target_points_01: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, dict]:
         """Compute hybrid loss."""
-        total_loss, loss_dict = self.unsupervised(pred_points, input_images)
+        total_loss, loss_dict = self.unsupervised(
+            pred_points,
+            input_images,
+            target_points_01=target_points_01,
+        )
         
         if gt_points is not None and self.gt_weight > 0:
             chamfer_loss = self.chamfer(pred_points, gt_points)

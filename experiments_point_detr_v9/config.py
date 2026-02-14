@@ -44,8 +44,8 @@ class TrainingConfig:
     # === UNSUPERVISED LOSS WEIGHTS ===
     # These are the only two losses needed!
     sinkhorn_weight: float = 1.0      # Capacity constraint (density matching)
-    repulsion_weight: float = 0.5     # Spacing constraint (blue noise)
-    render_weight: float = 0.3        # Render loss for tone/shape matching
+    repulsion_weight: float = 0.5     # Spacing constraint (soft repulsion)
+    render_weight: float = 10.0       # Render loss for tone/shape matching
     
     # Optional: GT supervision for hybrid training (set 0 for pure unsupervised)
     gt_weight: float = 0.0
@@ -53,6 +53,8 @@ class TrainingConfig:
     # Sinkhorn parameters
     sinkhorn_blur: float = 0.05
     sinkhorn_grid_size: int = 32
+    sinkhorn_mode: str = "sampled"  # "sampled" or "grid"
+    sinkhorn_gamma: float = 3.0
 
     # Render parameters
     render_grid_size: int = 64
@@ -60,6 +62,9 @@ class TrainingConfig:
     
     # Repulsion parameters
     base_radius: float = 0.02
+    repulsion_decay: float = 1.0
+    repulsion_epsilon: float = 1e-5
+    repulsion_max_loss: float = 500.0
     
     # Training details
     max_grad_norm: float = 1.0
