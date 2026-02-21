@@ -154,7 +154,7 @@ MNIST
 archive*/
 data*/
 co3d*/
-outputs*/
+*output*/
 #tools/
 #tests/
 evaluation_results*/
